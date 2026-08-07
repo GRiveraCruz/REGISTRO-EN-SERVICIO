@@ -1,0 +1,3504 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Persico México — Control de Asistencia</title>
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
+  <style>
+    /* ══ TOKENS ══════════════════════════════════════════════════════════ */
+    :root {
+      --red:       #C8102E;
+      --red-dark:  #9B0B22;
+      --red-light: #F5E6E9;
+      --ink:       #1A1A2E;
+      --ink-mid:   #3D3D5C;
+      --ink-soft:  #6B6B8A;
+      --surface:   #F8F8FC;
+      --white:     #FFFFFF;
+      --border:    #E2E2ED;
+      --green:     #00875A;
+      --green-bg:  #E3F5EE;
+      --amber:     #D97706;
+      --amber-bg:  #FEF3C7;
+      --danger-bg: #FEE2E2;
+      --shadow-sm: 0 1px 3px rgba(26,26,46,.08);
+      --shadow-md: 0 4px 16px rgba(26,26,46,.12);
+      --shadow-lg: 0 8px 32px rgba(26,26,46,.18);
+      --r:         10px;
+      --nav-h:     60px;      /* topbar height */
+      --bot-nav-h: 64px;      /* bottom nav mobile */
+    }
+
+    /* ══ RESET ═══════════════════════════════════════════════════════════ */
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    html { -webkit-text-size-adjust: 100%; }
+    body {
+      font-family: 'Segoe UI', system-ui, -apple-system, sans-serif;
+      background: var(--surface); color: var(--ink);
+      min-height: 100vh; min-height: 100dvh;
+      -webkit-tap-highlight-color: transparent;
+    }
+
+    /* ══ LOGIN ════════════════════════════════════════════════════════════ */
+    #loginScreen {
+      min-height: 100vh; min-height: 100dvh;
+      display: flex; align-items: center; justify-content: center;
+      background: linear-gradient(150deg, var(--ink) 0%, var(--ink-mid) 55%, var(--red-dark) 100%);
+      padding: 16px;
+    }
+    .login-card {
+      background: var(--white); border-radius: 20px;
+      padding: clamp(28px, 6vw, 52px) clamp(20px, 5vw, 44px);
+      width: 100%; max-width: 420px; box-shadow: var(--shadow-lg);
+    }
+    .login-logo { text-align: center; margin-bottom: 28px; }
+    .login-logo .shield { font-size: clamp(36px, 8vw, 52px); margin-bottom: 8px; }
+    .login-logo .brand { font-size: clamp(22px, 5vw, 30px); font-weight: 800; color: var(--ink); letter-spacing: -1px; }
+    .login-logo .brand span { color: var(--red); }
+    .login-logo .sub { font-size: 11px; color: var(--ink-soft); margin-top: 4px; letter-spacing: .8px; text-transform: uppercase; }
+
+    /* ══ FORMS ════════════════════════════════════════════════════════════ */
+    label { display: block; font-size: 11px; font-weight: 700; color: var(--ink-soft); margin-bottom: 6px; text-transform: uppercase; letter-spacing: .6px; }
+    input, select, textarea {
+      width: 100%; padding: 12px 14px; border: 1.5px solid var(--border); border-radius: var(--r);
+      font-size: 16px; /* 16px prevents iOS zoom */
+      color: var(--ink); background: var(--white); transition: border .2s; font-family: inherit;
+      -webkit-appearance: none; appearance: none;
+    }
+    select { background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='8' viewBox='0 0 12 8'%3E%3Cpath fill='%236B6B8A' d='M6 8L0 0h12z'/%3E%3C/svg%3E"); background-repeat: no-repeat; background-position: right 14px center; padding-right: 36px; }
+    input:focus, select:focus { outline: none; border-color: var(--red); box-shadow: 0 0 0 3px rgba(200,16,46,.1); }
+    .form-group { margin-bottom: 16px; }
+
+    /* ══ BUTTONS ═════════════════════════════════════════════════════════ */
+    .btn {
+      display: inline-flex; align-items: center; justify-content: center; gap: 7px;
+      padding: 11px 20px; border-radius: var(--r); font-size: 14px; font-weight: 600;
+      cursor: pointer; border: none; transition: all .18s; white-space: nowrap;
+      font-family: inherit; line-height: 1; touch-action: manipulation;
+    }
+    .btn-primary   { background: var(--red);   color: var(--white); }
+    .btn-primary:hover   { background: var(--red-dark); }
+    .btn-secondary { background: var(--white); color: var(--ink); border: 1.5px solid var(--border); }
+    .btn-secondary:hover { background: var(--surface); border-color: var(--ink-soft); }
+    .btn-success   { background: var(--green); color: var(--white); }
+    .btn-success:hover   { background: #006B46; }
+    .btn-danger    { background: #DC2626; color: var(--white); }
+    .btn-danger:hover    { background: #B91C1C; }
+    .btn-sm  { padding: 7px 13px; font-size: 12px; border-radius: 7px; }
+    .btn-full { width: 100%; padding: 14px; font-size: 15px; }
+    .btn:active { transform: scale(.97); }
+
+    /* ══ APP SHELL ════════════════════════════════════════════════════════ */
+    #app { display: none; min-height: 100vh; min-height: 100dvh; flex-direction: column; }
+
+    /* Topbar */
+    .topbar {
+      background: var(--white); border-bottom: 1.5px solid var(--border);
+      display: flex; align-items: center; justify-content: space-between;
+      padding: 0 20px; height: var(--nav-h); position: sticky; top: 0; z-index: 200;
+      box-shadow: var(--shadow-sm);
+    }
+    .topbar-brand { display: flex; align-items: center; gap: 8px; }
+    .topbar-brand .logo-icon { font-size: 20px; }
+    .topbar-brand .name { font-size: 17px; font-weight: 800; color: var(--ink); letter-spacing: -0.5px; }
+    .topbar-brand .name span { color: var(--red); }
+    .topbar-right { display: flex; align-items: center; gap: 10px; }
+    .user-badge {
+      background: var(--red-light); color: var(--red-dark); padding: 4px 10px;
+      border-radius: 20px; font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: .5px;
+    }
+    .topbar-username { font-size: 13px; font-weight: 600; color: var(--ink-soft); }
+
+    /* Desktop top nav */
+    .nav-tabs {
+      background: var(--white); border-bottom: 1.5px solid var(--border);
+      display: flex; padding: 0 20px; gap: 2px; overflow-x: auto;
+      scrollbar-width: none;
+    }
+    .nav-tabs::-webkit-scrollbar { display: none; }
+    .nav-tab {
+      padding: 14px 16px; font-size: 13px; font-weight: 600; color: var(--ink-soft);
+      cursor: pointer; border-bottom: 2.5px solid transparent; transition: all .18s;
+      white-space: nowrap; display: flex; align-items: center; gap: 6px; flex-shrink: 0;
+    }
+    .nav-tab:hover { color: var(--ink); }
+    .nav-tab.active { color: var(--red); border-bottom-color: var(--red); }
+
+    /* Mobile bottom nav */
+    .bottom-nav {
+      display: none; position: fixed; bottom: 0; left: 0; right: 0; z-index: 200;
+      background: var(--white); border-top: 1.5px solid var(--border);
+      box-shadow: 0 -4px 16px rgba(26,26,46,.1);
+      height: var(--bot-nav-h); padding-bottom: env(safe-area-inset-bottom, 0);
+    }
+    .bottom-nav-inner { display: flex; height: 100%; }
+    .bottom-tab {
+      flex: 1; display: flex; flex-direction: column; align-items: center; justify-content: center;
+      gap: 3px; cursor: pointer; font-size: 10px; font-weight: 600; color: var(--ink-soft);
+      transition: color .18s; padding: 8px 4px; border: none; background: none; font-family: inherit;
+      touch-action: manipulation;
+    }
+    .bottom-tab .tab-icon { font-size: 20px; }
+    .bottom-tab.active { color: var(--red); }
+    .bottom-tab.active .tab-icon { filter: drop-shadow(0 0 4px rgba(200,16,46,.3)); }
+
+    /* Content area */
+    .main-content {
+      flex: 1; padding: 20px 16px;
+      max-width: 1140px; margin: 0 auto; width: 100%;
+    }
+
+    /* ══ PANELS ═══════════════════════════════════════════════════════════ */
+    .panel { display: none; }
+    .panel.active { display: block; }
+    .section-title { font-size: 18px; font-weight: 800; color: var(--ink); margin-bottom: 4px; }
+    .section-sub { font-size: 12px; color: var(--ink-soft); margin-bottom: 20px; }
+
+    /* ══ CARDS ════════════════════════════════════════════════════════════ */
+    .card {
+      background: var(--white); border-radius: var(--r);
+      border: 1.5px solid var(--border); padding: 20px;
+      margin-bottom: 16px; box-shadow: var(--shadow-sm);
+    }
+    .card-title { font-size: 14px; font-weight: 700; color: var(--ink); margin-bottom: 14px; display: flex; align-items: center; gap: 7px; }
+
+    /* ══ TABLE (desktop) ═══════════════════════════════════════════════════ */
+    .table-wrap { overflow-x: auto; border-radius: var(--r); border: 1.5px solid var(--border); }
+    table { width: 100%; border-collapse: collapse; font-size: 13px; min-width: 480px; }
+    thead { background: var(--surface); }
+    th { padding: 10px 14px; text-align: left; font-size: 10px; font-weight: 700; color: var(--ink-soft); text-transform: uppercase; letter-spacing: .6px; border-bottom: 1.5px solid var(--border); white-space: nowrap; }
+    td { padding: 11px 14px; border-bottom: 1px solid var(--border); vertical-align: middle; }
+    tr:last-child td { border-bottom: none; }
+    tr:hover td { background: var(--surface); }
+
+    /* ── Mobile card-rows for tables ── */
+    .card-rows { display: none; }
+    .card-row {
+      background: var(--white); border: 1.5px solid var(--border); border-radius: var(--r);
+      padding: 14px 16px; margin-bottom: 10px; box-shadow: var(--shadow-sm);
+    }
+    .card-row-title { font-size: 15px; font-weight: 700; color: var(--ink); margin-bottom: 6px; }
+    .card-row-meta { font-size: 12px; color: var(--ink-soft); line-height: 1.7; }
+    .card-row-actions { display: flex; gap: 8px; margin-top: 10px; }
+
+    /* ══ MAP ═════════════════════════════════════════════════════════════ */
+    #map { height: clamp(260px, 40vw, 420px); border-radius: var(--r); border: 1.5px solid var(--border); overflow: hidden; }
+
+    /* ══ ATTENDANCE (worker panel) ═══════════════════════════════════════ */
+    .attendance-hero {
+      background: linear-gradient(135deg, var(--ink) 0%, var(--ink-mid) 100%);
+      border-radius: 16px; padding: clamp(20px, 5vw, 36px); color: var(--white);
+      text-align: center; margin-bottom: 20px;
+    }
+    .attendance-hero .clock {
+      font-size: clamp(40px, 12vw, 62px); font-weight: 800;
+      letter-spacing: -2px; font-variant-numeric: tabular-nums; line-height: 1;
+    }
+    .attendance-hero .date-str { font-size: 13px; opacity: .7; margin-top: 6px; }
+    .attendance-hero .worker-name { font-size: clamp(16px, 4vw, 22px); font-weight: 700; margin: 16px 0 4px; }
+    .attendance-hero .worker-pos { font-size: 12px; opacity: .6; }
+
+    .geo-wrap { text-align: center; margin-bottom: 20px; }
+    .geo-status {
+      display: inline-flex; align-items: center; gap: 8px; padding: 10px 18px;
+      border-radius: 30px; font-size: 13px; font-weight: 600; max-width: 100%; text-align: left;
+      word-break: break-word;
+    }
+    .geo-ok      { background: var(--green-bg); color: var(--green); }
+    .geo-fail    { background: var(--danger-bg); color: #DC2626; }
+    .geo-checking{ background: var(--amber-bg);  color: var(--amber); }
+
+    .action-btns { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; margin-bottom: 20px; }
+    .action-btn {
+      padding: clamp(18px, 4vw, 26px) 16px; border-radius: 14px;
+      font-size: clamp(14px, 3.5vw, 17px); font-weight: 700;
+      cursor: pointer; border: none; transition: all .2s;
+      display: flex; flex-direction: column; align-items: center; gap: 8px;
+      touch-action: manipulation;
+    }
+    .action-btn .icon { font-size: clamp(26px, 6vw, 36px); }
+    .action-btn.entrada { background: var(--green); color: var(--white); }
+    .action-btn.entrada:hover { background: #006B46; transform: translateY(-2px); box-shadow: 0 6px 20px rgba(0,135,90,.3); }
+    .action-btn.salida  { background: var(--red);   color: var(--white); }
+    .action-btn.salida:hover  { background: var(--red-dark); transform: translateY(-2px); box-shadow: 0 6px 20px rgba(200,16,46,.3); }
+    .action-btn:disabled { opacity: .45; cursor: not-allowed; transform: none !important; box-shadow: none !important; }
+    .action-btn:active:not(:disabled) { transform: scale(.96) !important; }
+
+    /* ══ BADGE ════════════════════════════════════════════════════════════ */
+    .badge { display: inline-block; padding: 3px 9px; border-radius: 20px; font-size: 11px; font-weight: 700; }
+    .badge-green { background: var(--green-bg); color: var(--green); }
+    .badge-red   { background: var(--danger-bg); color: #DC2626; }
+    .badge-amber { background: var(--amber-bg);  color: var(--amber); }
+
+    /* ══ GRID ════════════════════════════════════════════════════════════ */
+    .grid-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
+    .grid-3 { display: grid; grid-template-columns: repeat(3, 1fr); gap: 14px; }
+
+    /* ══ STAT CARD ════════════════════════════════════════════════════════ */
+    .stat-card { background: var(--white); border-radius: var(--r); border: 1.5px solid var(--border); padding: 18px; box-shadow: var(--shadow-sm); }
+    .stat-val  { font-size: clamp(24px, 6vw, 34px); font-weight: 800; color: var(--ink); }
+    .stat-lbl  { font-size: 11px; color: var(--ink-soft); margin-top: 3px; font-weight: 600; text-transform: uppercase; letter-spacing: .5px; }
+
+    /* ══ ALERT ════════════════════════════════════════════════════════════ */
+    .alert { padding: 12px 16px; border-radius: var(--r); font-size: 13px; font-weight: 500; margin-bottom: 14px; }
+    .alert-success { background: var(--green-bg); color: var(--green); }
+    .alert-error   { background: var(--danger-bg); color: #DC2626; }
+    .alert-info    { background: var(--amber-bg);  color: var(--amber); }
+
+    /* ══ MODAL ════════════════════════════════════════════════════════════ */
+    .modal-overlay {
+      position: fixed; inset: 0; background: rgba(0,0,0,.55); z-index: 1000;
+      display: none; align-items: flex-end; justify-content: center;
+      padding: 0;
+    }
+    .modal-overlay.open { display: flex; }
+    .modal {
+      background: var(--white); border-radius: 20px 20px 0 0; padding: 24px 20px;
+      width: 100%; max-width: 100%; box-shadow: var(--shadow-lg);
+      max-height: 92dvh; overflow-y: auto;
+      animation: slideUp .25s ease;
+    }
+    @keyframes slideUp { from { transform: translateY(100%); } to { transform: translateY(0); } }
+    .modal-title { font-size: 17px; font-weight: 800; margin-bottom: 18px; color: var(--ink); }
+    .modal-actions { display: flex; gap: 10px; justify-content: stretch; margin-top: 20px; }
+    .modal-actions .btn { flex: 1; }
+    .modal-drag { width: 36px; height: 4px; background: var(--border); border-radius: 2px; margin: 0 auto 16px; }
+
+    /* ── Map modal wider on desktop ── */
+    #mapModal .modal-inner { max-width: 680px; }
+    #locationMap { height: clamp(260px, 45vw, 380px); border-radius: var(--r); overflow: hidden; margin-bottom: 14px; }
+
+    /* ══ TOAST ════════════════════════════════════════════════════════════ */
+    .toast-container { position: fixed; bottom: 80px; right: 16px; z-index: 9999; display: flex; flex-direction: column; gap: 8px; pointer-events: none; }
+    .toast {
+      background: var(--ink); color: var(--white); padding: 11px 18px; border-radius: var(--r);
+      font-size: 13px; font-weight: 500; box-shadow: var(--shadow-md);
+      animation: toastIn .3s ease; max-width: 300px; pointer-events: auto;
+    }
+    .toast.success { background: var(--green); }
+    .toast.error   { background: #DC2626; }
+    @keyframes toastIn { from { transform: translateX(110%); opacity: 0; } to { transform: translateX(0); opacity: 1; } }
+
+    /* ══ TOOLBAR INSIDE CARDS ════════════════════════════════════════════ */
+    .card-toolbar { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 10px; margin-bottom: 16px; }
+    .card-toolbar-left  { display: flex; gap: 8px; flex-wrap: wrap; }
+    .card-toolbar-right { display: flex; gap: 8px; flex-wrap: wrap; }
+
+    /* ══ RESPONSIVE BREAKPOINTS ══════════════════════════════════════════ */
+
+    /* ── TABLET 600px+ ── */
+    @media (min-width: 600px) {
+      .modal-overlay { align-items: center; padding: 20px; }
+      .modal {
+        border-radius: 16px; max-width: 500px; max-height: 90dvh;
+        animation: fadeScale .2s ease;
+      }
+      #mapModal .modal { max-width: 700px; }
+      @keyframes fadeScale { from { transform: scale(.95); opacity:0; } to { transform: scale(1); opacity:1; } }
+      .modal-drag { display: none; }
+      .modal-actions .btn { flex: unset; }
+      .modal-actions { justify-content: flex-end; }
+      .toast-container { bottom: 24px; }
+    }
+
+    /* ── DESKTOP 768px+ ── */
+    @media (min-width: 768px) {
+      .nav-tabs { display: flex; }
+      .bottom-nav { display: none !important; }
+      .main-content { padding: 28px 24px; }
+      .topbar { padding: 0 24px; }
+      .topbar-username { display: block; }
+    }
+
+    /* ── MOBILE <768px ── */
+    @media (max-width: 767px) {
+      .nav-tabs { display: none; }
+      .bottom-nav { display: block; }
+      /* Pad content so it's not behind bottom nav */
+      .main-content { padding-bottom: calc(var(--bot-nav-h) + 16px + env(safe-area-inset-bottom, 0)); }
+      .toast-container { bottom: calc(var(--bot-nav-h) + 12px); }
+      .topbar-username { display: none; }
+      /* Tables → card rows on mobile */
+      .table-wrap table { display: none; }
+      .table-wrap + .card-rows, .card-rows { display: block; }
+      /* Grid collapses */
+      .grid-2, .grid-3 { grid-template-columns: 1fr; }
+      /* Stat grid stays 3-col even on mobile */
+      .grid-stats { grid-template-columns: repeat(3, 1fr) !important; gap: 8px; }
+      .stat-card { padding: 12px; }
+      /* Toolbar stacks */
+      .card-toolbar { flex-direction: column; align-items: stretch; }
+      .card-toolbar-left, .card-toolbar-right { width: 100%; }
+      .card-toolbar-left .btn, .card-toolbar-right input { width: 100%; }
+    }
+
+    /* ── SMALL MOBILE <400px ── */
+    @media (max-width: 399px) {
+      .action-btns { grid-template-columns: 1fr; }
+      .grid-stats { grid-template-columns: 1fr !important; }
+    }
+    /* ══ REPORT SUB-TABS ══════════════════════════════════════════════════ */
+    .report-subtab {
+      padding: 10px 18px; font-size: 13px; font-weight: 600; color: var(--ink-soft);
+      cursor: pointer; border-bottom: 2.5px solid transparent; transition: all .18s; white-space: nowrap;
+    }
+    .report-subtab:hover { color: var(--ink); }
+    .report-subtab.active { color: var(--red); border-bottom-color: var(--red); }
+
+    /* Mode toggle buttons */
+    .mode-btn {
+      padding: 9px 18px; font-size: 13px; font-weight: 600; cursor: pointer;
+      border: none; background: var(--surface); color: var(--ink-soft);
+      transition: all .18s; font-family: inherit;
+    }
+    .mode-btn.active { background: var(--red); color: var(--white); }
+    .mode-btn:hover:not(.active) { background: var(--border); color: var(--ink); }
+
+    /* Weekly report table styling */
+    #weeklyTable thead tr { background: var(--ink) !important; }
+    #weeklyTable th { color: var(--white) !important; background: var(--ink); }
+    #weeklyTable tfoot tr { background: var(--red-light); font-weight: 700; }
+    #weeklyTable tfoot td { border-top: 2px solid var(--red); color: var(--ink); }
+    .day-weekend td { background: #FFF8F0; color: var(--amber); }
+    .day-norecord td { color: var(--ink-soft); font-style: italic; }
+    .area-worker-table { margin-bottom: 24px; }
+    .area-worker-table table { min-width: 400px; }
+    .area-worker-name { font-size: 14px; font-weight: 700; color: var(--ink); padding: 10px 0 6px; border-bottom: 1.5px solid var(--border); margin-bottom: 6px; }
+
+    /* Signature boxes */
+    .sig-box {
+      border: 1.5px solid var(--border); border-radius: var(--r);
+      padding: 16px; text-align: center; background: var(--surface);
+    }
+    .sig-label { font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: .6px; color: var(--ink-soft); margin-bottom: 8px; }
+    .sig-name  { font-size: 16px; font-weight: 700; color: var(--ink); margin-bottom: 4px; min-height: 24px; }
+    .sig-status { font-size: 12px; font-weight: 600; }
+    .sig-status.unsigned { color: var(--ink-soft); }
+    .sig-status.signed   { color: var(--green); }
+    .sig-line { border-top: 1.5px solid var(--ink); width: 80%; margin: 12px auto 6px; display: none; }
+    .sig-box.signed-box .sig-line { display: block; }
+    .sig-box.signed-box { border-color: var(--green); background: var(--green-bg); }
+
+    /* ══ JOB HOURS MODAL ═════════════════════════════════════════════════ */
+    .job-hours-input {
+      width: 110px; padding: 8px 10px; border: 1.5px solid var(--border);
+      border-radius: 8px; font-size: 15px; font-weight: 600; text-align: center;
+      font-family: inherit; color: var(--ink); transition: border .15s;
+    }
+    .job-hours-input:focus { outline: none; border-color: var(--red); }
+    .job-hours-input.over  { border-color: #DC2626; background: var(--danger-bg); }
+    .job-tag { font-size: 12px; font-weight: 700; color: var(--ink-soft); background: var(--surface); border: 1.5px solid var(--border); border-radius: 6px; padding: 3px 8px; display: inline-block; }
+
+    /* Job summary under day rows in weekly table */
+    .day-jobs-summary { font-size: 10px; color: var(--ink-soft); margin-top: 3px; line-height: 1.6; }
+    .day-jobs-summary span { display: inline-block; background: var(--surface); border: 1px solid var(--border); border-radius: 4px; padding: 1px 5px; margin: 1px 2px; font-weight: 600; }
+
+    /* ══ CUSTOM LOCATION CHECKBOXES ══════════════════════════════════════ */
+    .loc-check-item {
+      display: flex; align-items: center; gap: 12px;
+      padding: 10px 12px; border-radius: 8px; cursor: pointer;
+      border: 1.5px solid var(--border); transition: all .15s;
+      user-select: none;
+    }
+    .loc-check-item:hover { border-color: var(--red); background: var(--red-light); }
+    .loc-check-item.selected { border-color: var(--red); background: var(--red-light); }
+    .loc-check-box {
+      width: 22px; height: 22px; border-radius: 6px; flex-shrink: 0;
+      border: 2px solid var(--border); background: var(--white);
+      display: flex; align-items: center; justify-content: center;
+      font-size: 13px; font-weight: 800; color: var(--white);
+      transition: all .15s;
+    }
+    .loc-check-item.selected .loc-check-box {
+      background: var(--red); border-color: var(--red);
+    }
+    .loc-check-item:hover:not(.selected) .loc-check-box { border-color: var(--red); }
+    .loc-check-label { flex: 1; font-size: 14px; font-weight: 400; color: var(--ink); text-transform: none; letter-spacing: 0; line-height: 1.4; }
+    .loc-check-label strong { font-weight: 700; }
+    .loc-check-desc { color: var(--ink-soft); font-size: 12px; }
+
+  </style>
+</head>
+<body>
+
+<!-- ══ LOGIN ══════════════════════════════════════════════════════════ -->
+<div id="loginScreen">
+  <div class="login-card">
+    <div class="login-logo">
+      <div class="shield">🏭</div>
+      <div class="brand">Persico<span>MX</span></div>
+      <div class="sub">Control de Asistencia en Campo</div>
+    </div>
+    <div id="loginAlert"></div>
+    <div class="form-group">
+      <label>Usuario</label>
+      <input id="loginUser" type="text" placeholder="Ingrese su usuario" autocomplete="username" />
+    </div>
+    <div class="form-group">
+      <label>Contraseña</label>
+      <input id="loginPass" type="password" placeholder="••••••••" autocomplete="current-password" />
+    </div>
+    <button class="btn btn-primary btn-full" onclick="doLogin()">Ingresar →</button>
+    <p style="text-align:center;font-size:12px;color:var(--ink-soft);margin-top:20px;">
+      Usuario general: seleccione <strong>Acceso de Trabajador</strong> abajo
+    </p>
+    <button class="btn btn-secondary btn-full" style="margin-top:8px;" onclick="showWorkerLogin()">👷 Acceso de Trabajador</button>
+  </div>
+</div>
+
+<!-- Edit Record Modal (Admin only) -->
+<div class="modal-overlay" id="editRecordModal">
+  <div class="modal">
+    <div class="modal-drag"></div>
+    <div class="modal-title">✏️ Editar Registro</div>
+    <div style="background:var(--amber-bg);border:1.5px solid var(--amber);border-radius:var(--r);padding:10px 14px;font-size:12px;color:var(--amber);font-weight:600;margin-bottom:16px;">
+      ⚠️ Solo el Administrador puede modificar registros. Los cambios quedan en el historial.
+    </div>
+    <div class="form-group">
+      <label>Trabajador</label>
+      <input id="erWorkerName" type="text" disabled style="background:var(--surface);color:var(--ink-soft);" />
+    </div>
+    <div class="form-group">
+      <label>Tipo</label>
+      <select id="erType">
+        <option value="entrada">Entrada</option>
+        <option value="salida">Salida</option>
+      </select>
+    </div>
+    <div class="form-group">
+      <label>Fecha y hora</label>
+      <input id="erTimestamp" type="datetime-local" />
+    </div>
+    <div class="form-group">
+      <label>Horas totales jornada <span style="font-weight:400;font-size:11px;color:var(--ink-soft);text-transform:none;letter-spacing:0;">(recalcula automáticamente al guardar)</span></label>
+      <input id="erTotalHours" type="number" step="0.25" min="0" max="24" placeholder="Se recalcula automáticamente" />
+    </div>
+    <input type="hidden" id="erRecordId" />
+    <div class="modal-actions">
+      <button class="btn btn-secondary" onclick="closeModal('editRecordModal')">Cancelar</button>
+      <button class="btn btn-primary" onclick="saveRecord()">Guardar cambios</button>
+    </div>
+  </div>
+</div>
+
+<!-- ══ JOB HOURS MODAL ════════════════════════════════════════════════ -->
+<div class="modal-overlay" id="jobHoursModal">
+  <div class="modal" style="max-width:520px;">
+    <div class="modal-drag"></div>
+    <div class="modal-title">🗂 Distribución de Horas por Job</div>
+    <div id="jobHoursSummary" style="background:var(--surface);border:1.5px solid var(--border);border-radius:var(--r);padding:12px 16px;margin-bottom:18px;display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px;">
+      <div>
+        <div style="font-size:11px;color:var(--ink-soft);font-weight:700;text-transform:uppercase;letter-spacing:.5px;">Total de horas del día</div>
+        <div style="font-size:24px;font-weight:800;color:var(--ink);" id="jobHoursTotalDisplay">0 h</div>
+      </div>
+      <div style="text-align:right;">
+        <div style="font-size:11px;color:var(--ink-soft);font-weight:700;text-transform:uppercase;letter-spacing:.5px;">Horas asignadas</div>
+        <div style="font-size:24px;font-weight:800;" id="jobHoursAssignedDisplay">0 h</div>
+      </div>
+    </div>
+    <div id="jobHoursError" style="display:none;" class="alert alert-error"></div>
+    <!-- Jobs list — plain divs, not a table, so mobile CSS doesn't hide it -->
+    <div style="margin-bottom:16px;">
+      <div style="display:flex;justify-content:space-between;padding:8px 4px;font-size:11px;font-weight:700;color:var(--ink-soft);text-transform:uppercase;letter-spacing:.5px;border-bottom:1.5px solid var(--border);margin-bottom:8px;">
+        <span>Job / Proyecto</span><span>Horas</span>
+      </div>
+      <div id="jobHoursBody"></div>
+    </div>
+    <div style="font-size:12px;color:var(--ink-soft);margin-bottom:16px;">
+      💡 La suma no puede exceder el total de la jornada. Deja en 0 los jobs no trabajados.
+    </div>
+    <div class="modal-actions">
+      <button class="btn btn-primary btn-full" onclick="saveJobHours()">✅ Guardar distribución</button>
+    </div>
+  </div>
+</div>
+
+<!-- ADMIN: editar distribución de horas por Job (desde Reportes → Jobs por Día) -->
+<div class="modal-overlay" id="adminJobHoursModal">
+  <div class="modal" style="max-width:520px;">
+    <div class="modal-drag"></div>
+    <div class="modal-title">🗂 Editar Distribución de Horas</div>
+    <div id="adminJobHoursSummary" style="background:var(--surface);border:1.5px solid var(--border);border-radius:var(--r);padding:12px 16px;margin-bottom:18px;display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px;">
+      <div>
+        <div style="font-size:11px;color:var(--ink-soft);font-weight:700;text-transform:uppercase;letter-spacing:.5px;" id="adminJobHoursSubtitle">—</div>
+        <div style="font-size:24px;font-weight:800;color:var(--ink);" id="adminJobHoursTotalDisplay">0 h</div>
+      </div>
+      <div style="text-align:right;">
+        <div style="font-size:11px;color:var(--ink-soft);font-weight:700;text-transform:uppercase;letter-spacing:.5px;">Horas asignadas</div>
+        <div style="font-size:24px;font-weight:800;" id="adminJobHoursAssignedDisplay">0 h</div>
+      </div>
+    </div>
+    <div id="adminJobHoursError" style="display:none;" class="alert alert-error"></div>
+    <div style="margin-bottom:16px;">
+      <div style="display:flex;justify-content:space-between;padding:8px 4px;font-size:11px;font-weight:700;color:var(--ink-soft);text-transform:uppercase;letter-spacing:.5px;border-bottom:1.5px solid var(--border);margin-bottom:8px;">
+        <span>Job / Proyecto</span><span>Horas</span>
+      </div>
+      <div id="adminJobHoursBody"></div>
+      <div style="display:flex;gap:8px;margin-top:10px;">
+        <input type="text" id="adminNewJobCode" placeholder="Agregar otro job (ej. 652-51)" style="flex:1;padding:8px 10px;border:1.5px solid var(--border);border-radius:var(--r);font-size:13px;" />
+        <button class="btn btn-secondary btn-sm" onclick="adminAddJobRow()">+ Agregar</button>
+      </div>
+    </div>
+    <div style="font-size:12px;color:var(--ink-soft);margin-bottom:16px;">
+      💡 La suma no puede exceder el total de la jornada de ese día. Deja en 0 los jobs no trabajados.
+    </div>
+    <div class="modal-actions">
+      <button class="btn btn-secondary" onclick="closeModal('adminJobHoursModal')">Cancelar</button>
+      <button class="btn btn-primary" onclick="adminSaveJobHours()">✅ Guardar distribución</button>
+    </div>
+  </div>
+</div>
+
+<!-- ══ WORKER LOGIN ════════════════════════════════════════════════════ -->
+<div class="modal-overlay" id="workerLoginModal">
+  <div class="modal">
+    <div class="modal-drag"></div>
+    <div class="modal-title">👷 Acceso de Trabajador</div>
+    <div id="rememberedWorkerBanner" style="display:none;background:var(--green-bg);border:1.5px solid var(--green);border-radius:var(--r);padding:12px 14px;margin-bottom:16px;">
+      <div style="font-size:12px;color:var(--green);font-weight:700;margin-bottom:4px;">ÚLTIMO ACCESO RECORDADO</div>
+      <div style="display:flex;align-items:center;justify-content:space-between;gap:10px;">
+        <span id="rememberedWorkerName" style="font-size:15px;font-weight:700;color:var(--ink);"></span>
+        <button class="btn btn-success btn-sm" onclick="loginRememberedWorker()">Entrar →</button>
+      </div>
+      <div style="margin-top:8px;font-size:12px;color:var(--ink-soft);">¿No eres tú? Selecciona tu nombre abajo.</div>
+    </div>
+    <div class="form-group">
+      <label>Selecciona tu nombre</label>
+      <select id="workerSelect"><option value="">— Cargando lista —</option></select>
+    </div>
+    <label style="display:flex;align-items:center;gap:8px;cursor:pointer;font-size:13px;font-weight:500;text-transform:none;letter-spacing:0;color:var(--ink-soft);margin-bottom:16px;">
+      <input type="checkbox" id="rememberWorker" style="width:15px;height:15px;accent-color:var(--red);cursor:pointer;" checked />
+      Recordar mi selección en este dispositivo
+    </label>
+    <div class="modal-actions">
+      <button class="btn btn-secondary" onclick="closeWorkerLogin()">Cancelar</button>
+      <button class="btn btn-primary" onclick="doWorkerLogin()">Entrar →</button>
+    </div>
+  </div>
+</div>
+
+<!-- ══ APP ════════════════════════════════════════════════════════════ -->
+<div id="app">
+  <div class="topbar">
+    <div class="topbar-brand">
+      <span class="logo-icon">🏭</span>
+      <span class="name">Persico<span>MX</span></span>
+    </div>
+    <div class="topbar-right">
+      <span class="user-badge" id="roleBadge">—</span>
+      <span class="topbar-username" id="topUserName"></span>
+      <button class="btn btn-secondary btn-sm" onclick="logout()">Salir</button>
+    </div>
+  </div>
+
+  <!-- Desktop nav -->
+  <div class="nav-tabs" id="navTabs"></div>
+
+  <!-- Mobile bottom nav -->
+  <nav class="bottom-nav" id="bottomNav">
+    <div class="bottom-nav-inner" id="bottomNavInner"></div>
+  </nav>
+
+  <div class="main-content">
+    <!-- PANEL: Registro (trabajador) -->
+    <div class="panel" id="panel-registro">
+      <div class="attendance-hero">
+        <div class="clock" id="clockDisplay">00:00:00</div>
+        <div class="date-str" id="dateDisplay">—</div>
+        <div class="worker-name" id="heroWorkerName">—</div>
+        <div class="worker-pos" id="heroWorkerPos"></div>
+      </div>
+      <div class="geo-wrap">
+        <div class="geo-status geo-checking" id="geoStatus">
+          <span>📡</span> Verificando ubicación…
+        </div>
+      </div>
+      <div id="locationSelector" style="margin-bottom:16px;display:none;">
+        <div class="card">
+          <div class="card-title">📍 Selecciona punto de registro</div>
+          <select id="workerLocationSelect" class="form-group">
+            <option value="">— Selecciona ubicación —</option>
+          </select>
+        </div>
+      </div>
+      <div class="action-btns">
+        <button class="action-btn entrada" id="btnEntrada" onclick="registerRecord('entrada')" disabled>
+          <span class="icon">🟢</span> Registrar Entrada
+        </button>
+        <button class="action-btn salida" id="btnSalida" onclick="registerRecord('salida')" disabled>
+          <span class="icon">🔴</span> Registrar Salida
+        </button>
+      </div>
+      <div style="margin-top:20px;">
+        <div class="card">
+          <div class="card-title">📋 Mis últimos registros</div>
+          <div id="myRecordsTable">Cargando…</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- PANEL: Mis Permisos -->
+    <div class="panel" id="panel-permisos">
+      <div class="card">
+        <div class="card-title">📝 Solicitar Permiso</div>
+        <div class="form-group">
+          <label>Tipo de Permiso</label>
+          <select id="pmTipo">
+            <option value="Vacaciones">Vacaciones</option>
+            <option value="Permiso por horas">Permiso por horas</option>
+            <option value="Tiempo por Tiempo">Tiempo por Tiempo</option>
+            <option value="Incapacidad (IMSS)">Incapacidad (IMSS)</option>
+            <option value="Defunción de familiar directo">Defunción de familiar directo</option>
+            <option value="Permiso de Maternidad">Permiso de Maternidad</option>
+            <option value="Permiso de Paternidad">Permiso de Paternidad</option>
+          </select>
+        </div>
+        <div style="display:flex;gap:8px;margin-bottom:16px">
+          <button class="btn btn-primary btn-sm" id="pmModDiasBtn" onclick="pmKioskSetModalidad('dias')" style="flex:1">📅 Días completos</button>
+          <button class="btn btn-secondary btn-sm" id="pmModHorasBtn" onclick="pmKioskSetModalidad('horas')" style="flex:1">⏱ Por horas</button>
+        </div>
+        <div id="pmFieldsDias">
+          <div class="form-group"><label>Fecha Inicio</label><input type="date" id="pmFechaInicio"></div>
+          <div class="form-group"><label>Fecha Fin</label><input type="date" id="pmFechaFin"></div>
+        </div>
+        <div id="pmFieldsHoras" style="display:none">
+          <div class="form-group"><label>Fecha</label><input type="date" id="pmFechaH"></div>
+          <div class="form-group"><label>Hora Inicio</label><input type="time" id="pmHoraInicio"></div>
+          <div class="form-group"><label>Hora Fin</label><input type="time" id="pmHoraFin"></div>
+        </div>
+        <div class="form-group">
+          <label>Motivo (opcional)</label>
+          <textarea id="pmMotivo" rows="3" placeholder="Describe brevemente el motivo…" style="width:100%;padding:10px;border:1.5px solid var(--border);border-radius:var(--r);font-family:inherit;font-size:14px"></textarea>
+        </div>
+        <div id="pmSubmitAlert"></div>
+        <button class="btn btn-primary" style="width:100%" onclick="pmKioskSubmit()" id="pmSubmitBtn">Enviar Solicitud →</button>
+      </div>
+
+      <div class="card" style="margin-top:16px">
+        <div class="card-title">📋 Mis Solicitudes</div>
+        <div id="pmMisSolicitudes">Cargando…</div>
+      </div>
+    </div>
+
+    <!-- PANEL: Trabajadores -->
+    <div class="panel" id="panel-trabajadores">
+      <div class="section-title">👷 Trabajadores</div>
+      <div class="section-sub">Gestión del personal registrado en el sistema</div>
+      <div class="card">
+        <div class="card-toolbar">
+          <div class="card-toolbar-left">
+            <button class="btn btn-primary" onclick="openAddWorker()">+ Nuevo</button>
+            <button class="btn btn-secondary" onclick="downloadTemplate()">📥 Plantilla</button>
+            <label class="btn btn-secondary" style="cursor:pointer;">
+              📤 Importar <input type="file" accept=".xlsx,.xls" style="display:none;" onchange="uploadWorkers(event)">
+            </label>
+          </div>
+          <div class="card-toolbar-right">
+            <input type="text" placeholder="🔍 Buscar…" style="width:200px;" oninput="filterWorkers(this.value)" />
+          </div>
+        </div>
+        <!-- Desktop table -->
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th>Nombre</th><th>Puesto</th><th>Área</th><th>Allowed Jobs</th><th>Jornada</th><th>Ubicación</th><th>Acciones</th></tr></thead>
+            <tbody id="workersBody"></tbody>
+          </table>
+        </div>
+        <!-- Mobile card-rows -->
+        <div class="card-rows" id="workersCards"></div>
+      </div>
+    </div>
+
+    <!-- PANEL: Ubicaciones -->
+    <div class="panel" id="panel-ubicaciones">
+      <div class="section-title">📍 Puntos de Registro</div>
+      <div class="section-sub">Geocercas de 150 m generadas automáticamente alrededor de cada punto</div>
+      <div class="card">
+        <div style="margin-bottom:16px;">
+          <button class="btn btn-primary btn-full" style="max-width:220px;" onclick="openAddLocation()">+ Nueva Ubicación</button>
+        </div>
+        <!-- Desktop table -->
+        <div class="table-wrap" style="margin-bottom:20px;">
+          <table>
+            <thead><tr><th>Nombre</th><th>Descripción</th><th>Coordenadas</th><th>Radio</th><th>Acciones</th></tr></thead>
+            <tbody id="locationsBody"></tbody>
+          </table>
+        </div>
+        <!-- Mobile card-rows -->
+        <div class="card-rows" id="locationsCards" style="margin-bottom:16px;"></div>
+        <div id="map"></div>
+      </div>
+    </div>
+
+    <!-- PANEL: Usuarios -->
+    <div class="panel" id="panel-usuarios">
+      <div class="section-title">🔐 Usuarios del Sistema</div>
+      <div class="section-sub">Administración de cuentas de acceso y niveles de permiso</div>
+
+      <!-- Signers config -->
+      <div class="card">
+        <div class="card-title">✍️ Firmantes Autorizados de Reportes</div>
+        <p style="font-size:13px;color:var(--ink-soft);margin-bottom:16px;">Define qué usuarios pueden firmar cada tipo de autorización en los reportes semanales.</p>
+        <div class="grid-2" style="margin-bottom:16px;">
+          <div class="form-group">
+            <label>Firma de Gerencia</label>
+            <select id="signerGerencia" onchange="saveSigners()">
+              <option value="">— Sin asignar —</option>
+            </select>
+          </div>
+          <div class="form-group">
+            <label>Firma de RRHH</label>
+            <select id="signerRRHH" onchange="saveSigners()">
+              <option value="">— Sin asignar —</option>
+            </select>
+          </div>
+        </div>
+        <div id="signersStatus" style="font-size:12px;color:var(--green);display:none;">✓ Configuración guardada</div>
+      </div>
+
+      <!-- Users table -->
+      <div class="card">
+        <div class="card-toolbar">
+          <div class="card-toolbar-left">
+            <button class="btn btn-primary" onclick="openAddUser()">+ Nuevo Usuario</button>
+          </div>
+        </div>
+        <!-- Desktop table -->
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th>Nombre</th><th>Usuario</th><th>Rol</th><th>Acciones</th></tr></thead>
+            <tbody id="usersBody"></tbody>
+          </table>
+        </div>
+        <!-- Mobile card-rows -->
+        <div class="card-rows" id="usersCards"></div>
+      </div>
+    </div>
+
+    <!-- PANEL: Notificaciones WhatsApp -->
+    <div class="panel" id="panel-notificaciones">
+      <div class="section-title">🔔 Notificaciones WhatsApp</div>
+      <div class="section-sub">Cuando un trabajador genera una solicitud de permiso, se les avisa por WhatsApp a los números activos de abajo.</div>
+
+      <div class="card">
+        <div class="card-title">📋 Cómo activar un número (CallMeBot, gratis)</div>
+        <ol style="font-size:13px;color:var(--ink-soft);line-height:1.9;margin-left:18px;">
+          <li>Desde el WhatsApp de la persona a notificar, agrega el contacto <strong>+34 644 51 95 23</strong></li>
+          <li>Envíale por WhatsApp exactamente este mensaje: <code style="background:var(--surface);padding:2px 6px;border-radius:4px;">I allow callmebot to send me messages</code></li>
+          <li>El bot responde con un <strong>API Key</strong> — cópialo y pégalo abajo junto con el número</li>
+          <li>Presiona "Probar" para confirmar que llega el mensaje antes de activarlo</li>
+        </ol>
+      </div>
+
+      <div class="card">
+        <div class="card-title">📱 Números a notificar (hasta 5)</div>
+        <div id="notificationsBody"></div>
+        <div id="notificationsStatus" style="font-size:12px;color:var(--green);display:none;margin-top:10px;">✓ Configuración guardada</div>
+        <button class="btn btn-primary" style="margin-top:16px;" onclick="saveNotifications()">💾 Guardar Notificaciones</button>
+      </div>
+    </div>
+
+    <!-- PANEL: Reportes -->
+    <div class="panel" id="panel-reportes">
+      <div class="section-title">📊 Reportes de Asistencia</div>
+      <div class="section-sub">Registro general y reporte semanal por trabajador</div>
+
+      <!-- Sub-tabs -->
+      <div style="display:flex;gap:4px;margin-bottom:20px;border-bottom:1.5px solid var(--border);">
+        <div class="report-subtab active" data-sub="general" onclick="switchReportTab('general')">📋 Registro General</div>
+        <div class="report-subtab" data-sub="semanal" onclick="switchReportTab('semanal')">📅 Reporte Semanal</div>
+        <div class="report-subtab" data-sub="jobs" onclick="switchReportTab('jobs')">🗂 Jobs por Día</div>
+        <div class="report-subtab" data-sub="control" onclick="switchReportTab('control')">📊 Control de Horas</div>
+      </div>
+
+      <!-- SUB-PANEL: General -->
+      <div id="sub-general" class="report-subpanel">
+        <div class="card">
+          <div class="card-title">Filtros</div>
+          <div class="grid-2" style="margin-bottom:12px;">
+            <div class="form-group" style="grid-column:1/-1;">
+              <label>Trabajador</label>
+              <select id="filterWorker"><option value="">Todos</option></select>
+            </div>
+            <div class="form-group">
+              <label>Desde</label>
+              <input type="date" id="filterFrom" />
+            </div>
+            <div class="form-group">
+              <label>Hasta</label>
+              <input type="date" id="filterTo" />
+            </div>
+          </div>
+          <div style="display:flex;gap:8px;flex-wrap:wrap;">
+            <button class="btn btn-primary" onclick="loadReports()">🔍 Consultar</button>
+            <button class="btn btn-success" onclick="exportRecords('xlsx')">📥 Excel</button>
+            <button class="btn btn-secondary" onclick="exportRecords('csv')">📄 CSV</button>
+          </div>
+        </div>
+        <div class="grid-3 grid-stats" style="margin-bottom:16px;">
+          <div class="stat-card"><div class="stat-val" id="statTotal">0</div><div class="stat-lbl">Total</div></div>
+          <div class="stat-card"><div class="stat-val" id="statEntradas">0</div><div class="stat-lbl">Entradas</div></div>
+          <div class="stat-card"><div class="stat-val" id="statSalidas">0</div><div class="stat-lbl">Salidas</div></div>
+        </div>
+        <div class="card">
+          <div class="card-title">Registros</div>
+          <div class="table-wrap">
+            <table>
+              <thead><tr><th>Trabajador</th><th>Fecha</th><th>Día</th><th>Hora</th><th>Tipo</th><th>Hrs Jornada</th><th>Hrs Base</th><th>Hrs Extra</th><th>Ubicación</th><th>Geocerca</th><th id="recordsAdminCol"></th></tr></thead>
+              <tbody id="recordsBody"></tbody>
+            </table>
+          </div>
+          <div class="card-rows" id="recordsCards"></div>
+        </div>
+      </div>
+
+      <!-- SUB-PANEL: Semanal -->
+      <div id="sub-semanal" class="report-subpanel" style="display:none;">
+        <div class="card">
+          <div class="card-title">📅 Parámetros del Reporte Semanal</div>
+
+          <!-- Mode toggle -->
+          <div style="display:flex;gap:0;margin-bottom:16px;border:1.5px solid var(--border);border-radius:var(--r);overflow:hidden;width:fit-content;">
+            <button id="modeIndividual" class="mode-btn active" onclick="setWeeklyMode('individual')">👤 Individual</button>
+            <button id="modeArea"       class="mode-btn"        onclick="setWeeklyMode('area')">🏭 Por Área</button>
+          </div>
+
+          <div class="grid-3" style="margin-bottom:12px;">
+            <!-- Individual mode -->
+            <div id="weeklyModeIndividual" class="form-group" style="grid-column:1/-1;">
+              <label>Trabajador</label>
+              <select id="weeklyWorker"><option value="">— Selecciona un trabajador —</option></select>
+            </div>
+            <!-- Area mode -->
+            <div id="weeklyModeArea" class="form-group" style="grid-column:1/-1;display:none;">
+              <label>Área</label>
+              <select id="weeklyArea">
+                <option value="">— Selecciona un área —</option>
+                <option value="Assembly">Assembly</option>
+                <option value="Manufacturing">Manufacturing</option>
+                <option value="Mechanical Eng">Mechanical Eng.</option>
+                <option value="Electrical Eng">Electrical Eng.</option>
+              </select>
+            </div>
+            <div class="form-group">
+              <label>Semana #</label>
+              <input type="number" id="weeklyWeek" min="1" max="53" placeholder="Ej. 26" inputmode="numeric" />
+            </div>
+            <div class="form-group">
+              <label>Año</label>
+              <input type="number" id="weeklyYear" min="2024" max="2099" placeholder="Ej. 2025" inputmode="numeric" />
+            </div>
+            <div class="form-group" style="display:flex;align-items:flex-end;">
+              <button class="btn btn-primary btn-full" onclick="generateWeeklyReport()">🔍 Generar</button>
+            </div>
+          </div>
+        </div>
+
+        <!-- Weekly report preview -->
+        <div id="weeklyReportPreview" style="display:none;">
+          <div class="card">
+            <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:10px;margin-bottom:16px;">
+              <div>
+                <div class="card-title" id="weeklyReportTitle" style="margin-bottom:2px;">Reporte Semanal</div>
+                <div style="font-size:12px;color:var(--ink-soft);" id="weeklyReportRange"></div>
+              </div>
+              <button class="btn btn-success" onclick="downloadWeeklyReport()">📥 Descargar Excel</button>
+            </div>
+
+            <!-- Summary header -->
+            <div id="weeklyWorkerInfo" style="background:var(--surface);border-radius:var(--r);padding:14px 16px;margin-bottom:16px;border:1.5px solid var(--border);"></div>
+
+            <!-- Daily breakdown (individual mode) -->
+            <div id="weeklyTableWrap" class="table-wrap">
+              <table id="weeklyTable">
+                <thead>
+                  <tr style="background:var(--ink);">
+                    <th style="color:#fff;">Día</th><th style="color:#fff;">Fecha</th>
+                    <th style="color:#fff;">Entrada</th><th style="color:#fff;">Salida</th>
+                    <th style="color:#fff;">Hrs Totales</th><th style="color:#fff;">Jornada Normal</th><th style="color:#fff;">Hrs Extras</th>
+                  </tr>
+                </thead>
+                <tbody id="weeklyBody"></tbody>
+                <tfoot id="weeklyFoot"></tfoot>
+              </table>
+            </div>
+
+            <!-- Area mode: per-worker sub-tables -->
+            <div id="weeklyAreaWrap" style="display:none;"></div>
+
+            <!-- Signature section -->
+            <div style="margin-top:28px;border-top:1.5px solid var(--border);padding-top:20px;">
+              <div style="font-size:12px;font-weight:700;color:var(--ink-soft);text-transform:uppercase;letter-spacing:.5px;margin-bottom:16px;">Autorizaciones</div>
+              <div class="grid-2">
+                <div class="sig-box" id="sigGerencia">
+                  <div class="sig-label">Gerencia</div>
+                  <div class="sig-name" id="sigGerenciaName">—</div>
+                  <div class="sig-status unsigned" id="sigGerenciaStatus">Sin firmar</div>
+                  <button class="btn btn-secondary btn-sm" style="margin-top:10px;" onclick="requestSignature('gerencia')">✍️ Firmar</button>
+                </div>
+                <div class="sig-box" id="sigRRHH">
+                  <div class="sig-label">Recursos Humanos</div>
+                  <div class="sig-name" id="sigRRHHName">—</div>
+                  <div class="sig-status unsigned" id="sigRRHHStatus">Sin firmar</div>
+                  <button class="btn btn-secondary btn-sm" style="margin-top:10px;" onclick="requestSignature('rrhh')">✍️ Firmar</button>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- SUB-PANEL: Jobs por día -->
+      <div id="sub-jobs" class="report-subpanel" style="display:none;">
+        <div class="card">
+          <div class="card-title">🗂 Filtros — Distribución de Horas por Job</div>
+          <div class="grid-2" style="margin-bottom:12px;">
+            <div class="form-group" style="grid-column:1/-1;">
+              <label>Trabajador</label>
+              <select id="jobsFilterWorker"><option value="">— Selecciona un trabajador —</option></select>
+            </div>
+            <div class="form-group">
+              <label>Semana #</label>
+              <input type="number" id="jobsFilterWeek" min="1" max="53" inputmode="numeric" />
+            </div>
+            <div class="form-group">
+              <label>Año</label>
+              <input type="number" id="jobsFilterYear" min="2024" max="2099" inputmode="numeric" />
+            </div>
+          </div>
+          <button class="btn btn-primary" onclick="loadJobsReport()">🔍 Consultar</button>
+        </div>
+        <div id="jobsReportWrap" style="display:none;">
+          <div class="card">
+            <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:10px;margin-bottom:16px;">
+              <div class="card-title" id="jobsReportTitle" style="margin-bottom:0;">Distribución de Jobs</div>
+              <button class="btn btn-success" onclick="downloadJobsReport()">📥 Descargar Excel</button>
+            </div>
+            <div class="table-wrap">
+              <table id="jobsTable">
+                <thead>
+                  <tr style="background:var(--ink);">
+                    <th style="color:#fff;">Día</th>
+                    <th style="color:#fff;">Fecha</th>
+                    <th style="color:#fff;">Hrs Total</th>
+                    <th style="color:#fff;" id="jobsTableJobsHeader"></th>
+                    <th style="color:#fff;">Acciones</th>
+                  </tr>
+                </thead>
+                <tbody id="jobsTableBody"></tbody>
+                <tfoot id="jobsTableFoot"></tfoot>
+              </table>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- SUB-PANEL: Control de Horas -->
+      <div id="sub-control" class="report-subpanel" style="display:none;">
+        <div class="card">
+          <div class="card-title">📊 Control de Horas — Filtros</div>
+
+          <!-- Filter mode toggle -->
+          <div style="display:flex;gap:0;margin-bottom:18px;border:1.5px solid var(--border);border-radius:var(--r);overflow:hidden;width:fit-content;flex-wrap:wrap;">
+            <button class="mode-btn active" id="ctrlModeWeek"  onclick="setCtrlMode('week')">📅 Semana(s)</button>
+            <button class="mode-btn"        id="ctrlModeMonth" onclick="setCtrlMode('month')">🗓 Mes</button>
+            <button class="mode-btn"        id="ctrlModeYear"  onclick="setCtrlMode('year')">📆 Año</button>
+            <button class="mode-btn"        id="ctrlModeJob"   onclick="setCtrlMode('job')">🗂 Job</button>
+          </div>
+
+          <div class="grid-2" style="margin-bottom:12px;">
+            <!-- Shared: worker -->
+            <div class="form-group" style="grid-column:1/-1;">
+              <label>Trabajador <span style="font-weight:400;font-size:11px;color:var(--ink-soft);text-transform:none;letter-spacing:0;">— dejar vacío para todos</span></label>
+              <select id="ctrlWorker"><option value="">Todos los trabajadores</option></select>
+            </div>
+
+            <!-- Week mode -->
+            <div id="ctrlWeekFields" class="form-group" style="display:contents;">
+              <div class="form-group">
+                <label>Semana inicio</label>
+                <input type="number" id="ctrlWeekFrom" min="1" max="53" inputmode="numeric" placeholder="Ej. 25" />
+              </div>
+              <div class="form-group">
+                <label>Semana fin</label>
+                <input type="number" id="ctrlWeekTo" min="1" max="53" inputmode="numeric" placeholder="Ej. 28" />
+              </div>
+              <div class="form-group">
+                <label>Año</label>
+                <input type="number" id="ctrlWeekYear" min="2024" max="2099" inputmode="numeric" />
+              </div>
+            </div>
+
+            <!-- Month mode -->
+            <div id="ctrlMonthFields" style="display:none;grid-column:1/-1;">
+              <div class="grid-2">
+                <div class="form-group">
+                  <label>Mes</label>
+                  <select id="ctrlMonth">
+                    <option value="1">Enero</option><option value="2">Febrero</option>
+                    <option value="3">Marzo</option><option value="4">Abril</option>
+                    <option value="5">Mayo</option><option value="6">Junio</option>
+                    <option value="7">Julio</option><option value="8">Agosto</option>
+                    <option value="9">Septiembre</option><option value="10">Octubre</option>
+                    <option value="11">Noviembre</option><option value="12">Diciembre</option>
+                  </select>
+                </div>
+                <div class="form-group">
+                  <label>Año</label>
+                  <input type="number" id="ctrlMonthYear" min="2024" max="2099" inputmode="numeric" />
+                </div>
+              </div>
+            </div>
+
+            <!-- Year mode -->
+            <div id="ctrlYearFields" style="display:none;grid-column:1/-1;">
+              <div class="form-group">
+                <label>Año</label>
+                <input type="number" id="ctrlYearVal" min="2024" max="2099" inputmode="numeric" />
+              </div>
+            </div>
+
+            <!-- Job mode -->
+            <div id="ctrlJobFields" style="display:none;grid-column:1/-1;">
+              <div class="grid-2">
+                <div class="form-group">
+                  <label>Job / Proyecto</label>
+                  <input type="text" id="ctrlJobVal" placeholder="Ej. 652-50 o ADMIN" />
+                </div>
+                <div class="form-group">
+                  <label>Año</label>
+                  <input type="number" id="ctrlJobYear" min="2024" max="2099" inputmode="numeric" />
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <button class="btn btn-primary" onclick="loadControlReport()">🔍 Generar</button>
+        </div>
+
+        <!-- Results -->
+        <div id="ctrlReportWrap" style="display:none;">
+          <div class="card">
+            <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:10px;margin-bottom:16px;">
+              <div>
+                <div class="card-title" id="ctrlReportTitle" style="margin-bottom:2px;">Control de Horas</div>
+                <div id="ctrlReportMeta" style="font-size:12px;color:var(--ink-soft);"></div>
+              </div>
+              <button class="btn btn-success" onclick="downloadControlReport()">📥 Descargar Excel</button>
+            </div>
+
+            <!-- Summary stats -->
+            <div class="grid-3 grid-stats" style="margin-bottom:16px;" id="ctrlStats"></div>
+
+            <!-- Table — desktop -->
+            <div class="table-wrap">
+              <table>
+                <thead>
+                  <tr style="background:var(--ink);">
+                    <th style="color:#fff;">Nombre</th>
+                    <th style="color:#fff;">Fecha</th>
+                    <th style="color:#fff;">Job</th>
+                    <th style="color:#fff;">Horas</th>
+                    <th style="color:#fff;">Área</th>
+                    <th style="color:#fff;">Autorizado</th>
+                  </tr>
+                </thead>
+                <tbody id="ctrlTableBody"></tbody>
+                <tfoot id="ctrlTableFoot"></tfoot>
+              </table>
+            </div>
+            <!-- Mobile card-rows -->
+            <div class="card-rows" id="ctrlCards"></div>
+
+            <!-- Signature section -->
+            <div style="margin-top:24px;border-top:1.5px solid var(--border);padding-top:20px;">
+              <div style="font-size:12px;font-weight:700;color:var(--ink-soft);text-transform:uppercase;letter-spacing:.5px;margin-bottom:16px;">Autorizaciones del Reporte</div>
+              <div class="grid-2">
+                <div class="sig-box" id="ctrlSigGerencia">
+                  <div class="sig-label">Gerencia</div>
+                  <div class="sig-name" id="ctrlSigGerenciaName">—</div>
+                  <div class="sig-status unsigned" id="ctrlSigGerenciaStatus">Sin firmar</div>
+                  <div class="sig-line"></div>
+                  <div style="margin-top:10px;display:flex;gap:6px;justify-content:center;flex-wrap:wrap;">
+                    <button class="btn btn-secondary btn-sm" id="ctrlBtnFirmarGerencia" onclick="ctrlRequestSignature('gerencia')">✍️ Firmar</button>
+                    <button class="btn btn-danger btn-sm" id="ctrlBtnRevocarGerencia" style="display:none;" onclick="ctrlRevokeSignature('gerencia')">✕ Revocar</button>
+                  </div>
+                </div>
+                <div class="sig-box" id="ctrlSigRRHH">
+                  <div class="sig-label">Recursos Humanos</div>
+                  <div class="sig-name" id="ctrlSigRRHHName">—</div>
+                  <div class="sig-status unsigned" id="ctrlSigRRHHStatus">Sin firmar</div>
+                  <div class="sig-line"></div>
+                  <div style="margin-top:10px;display:flex;gap:6px;justify-content:center;flex-wrap:wrap;">
+                    <button class="btn btn-secondary btn-sm" id="ctrlBtnFirmarRRHH" onclick="ctrlRequestSignature('rrhh')">✍️ Firmar</button>
+                    <button class="btn btn-danger btn-sm" id="ctrlBtnRevocarRRHH" style="display:none;" onclick="ctrlRevokeSignature('rrhh')">✕ Revocar</button>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ══ MODALES ═══════════════════════════════════════════════════════ -->
+<!-- Add/Edit User -->
+<div class="modal-overlay" id="userModal">
+  <div class="modal">
+    <div class="modal-drag"></div>
+    <div class="modal-title" id="userModalTitle">Nuevo Usuario</div>
+    <div class="form-group"><label>Nombre completo</label><input id="uName" type="text" placeholder="Ej. Carlos Ramírez" /></div>
+    <div class="form-group"><label>Usuario (login)</label><input id="uUsername" type="text" placeholder="Ej. carlos.ramirez" autocomplete="off" /></div>
+    <div class="form-group">
+      <label>Contraseña <span id="uPasswordHint" style="font-weight:400;text-transform:none;letter-spacing:0;color:var(--ink-soft);font-size:11px;">(dejar en blanco para no cambiar)</span></label>
+      <input id="uPassword" type="password" placeholder="••••••••" autocomplete="new-password" />
+    </div>
+    <div class="form-group">
+      <label>Nivel de acceso</label>
+      <select id="uRole">
+        <option value="admin">Administrador — acceso completo</option>
+        <option value="rrhh">RRHH — trabajadores y reportes</option>
+        <option value="worker">Trabajador — solo registro</option>
+      </select>
+    </div>
+    <input type="hidden" id="uId" />
+    <div class="modal-actions">
+      <button class="btn btn-secondary" onclick="closeModal('userModal')">Cancelar</button>
+      <button class="btn btn-primary" onclick="saveUser()">Guardar</button>
+    </div>
+  </div>
+</div>
+
+<!-- Signature Modal -->
+<div class="modal-overlay" id="signatureModal">
+  <div class="modal">
+    <div class="modal-drag"></div>
+    <div class="modal-title" id="sigModalTitle">✍️ Autorización de Gerencia</div>
+    <p style="font-size:13px;color:var(--ink-soft);margin-bottom:16px;" id="sigModalDesc">
+      Ingresa tu contraseña para firmar la autorización del reporte.
+    </p>
+    <div class="form-group">
+      <label>Usuario autorizado</label>
+      <select id="sigUserSelect"><option value="">— Selecciona —</option></select>
+    </div>
+    <div class="form-group">
+      <label>Contraseña</label>
+      <input id="sigPassword" type="password" placeholder="••••••••" autocomplete="current-password" />
+    </div>
+    <input type="hidden" id="sigType" />
+    <div class="modal-actions">
+      <button class="btn btn-secondary" onclick="closeModal('signatureModal')">Cancelar</button>
+      <button class="btn btn-primary" onclick="confirmSignature()">✅ Autorizar</button>
+    </div>
+  </div>
+</div>
+
+<!-- Add/Edit Worker -->
+<div class="modal-overlay" id="workerModal">
+  <div class="modal">
+    <div class="modal-drag"></div>
+    <div class="modal-title" id="workerModalTitle">Nuevo Trabajador</div>
+    <div class="form-group"><label>Nombre completo</label><input id="wName" type="text" placeholder="Ej. Juan Pérez García" /></div>
+    <div class="form-group"><label>Puesto</label><input id="wPosition" type="text" placeholder="Ej. Técnico de Mantenimiento" /></div>
+    <div class="form-group">
+      <label>Área</label>
+      <select id="wArea">
+        <option value="">— Sin asignar —</option>
+        <option value="Assembly">Assembly</option>
+        <option value="Manufacturing">Manufacturing</option>
+        <option value="Mechanical Eng">Mechanical Eng.</option>
+        <option value="Electrical Eng">Electrical Eng.</option>
+      </select>
+    </div>
+    <div class="form-group">
+      <label>Allowed Jobs <span style="font-weight:400;text-transform:none;letter-spacing:0;color:var(--ink-soft);font-size:11px;">— Números de proyecto separados por coma</span></label>
+      <input id="wAllowedJobs" type="text" placeholder="Ej. P-001, P-002, P-015" />
+    </div>
+    <div class="form-group">
+      <label>Jornada laboral</label>
+      <div class="grid-2">
+        <div><label>Entrada</label><input id="wShiftStart" type="time" value="07:00" /></div>
+        <div><label>Salida</label><input id="wShiftEnd" type="time" value="17:00" /></div>
+      </div>
+    </div>
+    <div class="form-group">
+      <label>Puntos de registro asignados</label>
+      <div id="wLocationsCheckboxes" style="border:1.5px solid var(--border);border-radius:var(--r);padding:10px 14px;max-height:160px;overflow-y:auto;display:flex;flex-direction:column;gap:8px;">
+        <span style="color:var(--ink-soft);font-size:12px;">Sin ubicaciones configuradas</span>
+      </div>
+    </div>
+    <input type="hidden" id="wId" />
+    <div class="modal-actions">
+      <button class="btn btn-secondary" onclick="closeModal('workerModal')">Cancelar</button>
+      <button class="btn btn-primary" onclick="saveWorker()">Guardar</button>
+    </div>
+  </div>
+</div>
+
+<!-- Add Location (with map) -->
+<div class="modal-overlay" id="mapModal">
+  <div class="modal" style="max-width:700px;">
+    <div class="modal-drag"></div>
+    <div class="modal-title">Nueva Ubicación de Registro</div>
+    <div class="grid-2" style="margin-bottom:12px;">
+      <div class="form-group"><label>Nombre del punto</label><input id="lName" type="text" placeholder="Ej. Planta Norte" /></div>
+      <div class="form-group"><label>Descripción</label><input id="lDesc" type="text" placeholder="Ej. Entrada principal" /></div>
+    </div>
+    <p style="font-size:12px;color:var(--ink-soft);margin-bottom:8px;">📍 Toca el mapa para seleccionar la ubicación exacta. La geocerca de 150 m se genera automáticamente.</p>
+    <div id="locationMap"></div>
+    <div class="grid-2" style="margin-top:12px;">
+      <div class="form-group"><label>Latitud</label><input id="lLat" type="number" step="0.000001" placeholder="19.432608" inputmode="decimal" /></div>
+      <div class="form-group"><label>Longitud</label><input id="lLng" type="number" step="0.000001" placeholder="-99.133208" inputmode="decimal" /></div>
+    </div>
+    <button class="btn btn-secondary btn-sm" onclick="useMyLocation()" style="margin-bottom:12px;">📡 Usar mi ubicación actual</button>
+    <input type="hidden" id="lId" />
+    <div class="modal-actions">
+      <button class="btn btn-secondary" onclick="closeModal('mapModal')">Cancelar</button>
+      <button class="btn btn-primary" onclick="saveLocation()">Guardar Geocerca</button>
+    </div>
+  </div>
+</div>
+
+<!-- Toast container -->
+<div class="toast-container" id="toastContainer"></div>
+
+<script>
+// ══════════════════════════════════════════════════════════════
+// STATE
+// ══════════════════════════════════════════════════════════════
+let currentUser = null;
+let workers = [];
+let locations = [];
+let records = [];
+let currentLat = null, currentLng = null;
+let geoInterval = null;
+let clockInterval = null;
+let mapInstance = null;
+let locationMapInstance = null;
+let mapCircles = [];
+let mapMarkers = [];
+let locationPickerMarker = null;
+let locationPickerCircle = null;
+
+const ROLE_LABELS = { admin: 'Administrador', rrhh: 'RRHH', worker: 'Trabajador' };
+
+// ══════════════════════════════════════════════════════════════
+// LOGIN
+// ══════════════════════════════════════════════════════════════
+async function doLogin() {
+  const username = document.getElementById('loginUser').value.trim();
+  const password = document.getElementById('loginPass').value;
+  if (!username || !password) return showLoginAlert('Complete todos los campos', 'error');
+  try {
+    const r = await fetch('/api/login', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({username, password}) });
+    const data = await r.json();
+    if (!r.ok) return showLoginAlert(data.error, 'error');
+    currentUser = data.user;
+    startApp();
+  } catch(e) { showLoginAlert('Error de conexión', 'error'); }
+}
+
+async function showWorkerLogin() {
+  await loadWorkers();
+  const sel = document.getElementById('workerSelect');
+  sel.innerHTML = '<option value="">— Selecciona tu nombre —</option>';
+  workers.filter(w => w.active !== false).forEach(w => {
+    const o = document.createElement('option');
+    o.value = w.id;
+    o.textContent = `${w.name} — ${w.position}`;
+    sel.appendChild(o);
+  });
+
+  // Check localStorage for remembered worker
+  try {
+    const savedId = localStorage.getItem('persico_worker_id');
+    const savedName = localStorage.getItem('persico_worker_name');
+    const banner = document.getElementById('rememberedWorkerBanner');
+    if (savedId && savedName && workers.find(w => w.id === savedId)) {
+      document.getElementById('rememberedWorkerName').textContent = savedName;
+      banner.style.display = 'block';
+      // Pre-select in the dropdown too
+      sel.value = savedId;
+    } else {
+      banner.style.display = 'none';
+    }
+  } catch(e) { /* localStorage not available */ }
+
+  document.getElementById('workerLoginModal').classList.add('open');
+}
+
+async function loginRememberedWorker() {
+  try {
+    const savedId = localStorage.getItem('persico_worker_id');
+    if (!savedId) return;
+    document.getElementById('workerSelect').value = savedId;
+    await doWorkerLogin();
+  } catch(e) { await doWorkerLogin(); }
+}
+
+function closeWorkerLogin() { document.getElementById('workerLoginModal').classList.remove('open'); }
+
+async function doWorkerLogin() {
+  const id = document.getElementById('workerSelect').value;
+  if (!id) return alert('Selecciona tu nombre');
+  const worker = workers.find(w => w.id === id);
+  const locationIds = worker.locationIds || (worker.locationId ? [worker.locationId] : []);
+  currentUser = {
+    id: worker.id,
+    name: worker.name,
+    role: 'worker',
+    position: worker.position,
+    area: worker.area || '',
+    allowedJobs: worker.allowedJobs || [],
+    locationIds,
+    shiftStart: worker.shiftStart,
+    shiftEnd: worker.shiftEnd
+  };
+
+  // Remember selection in this device
+  try {
+    const remember = document.getElementById('rememberWorker')?.checked !== false;
+    if (remember) {
+      localStorage.setItem('persico_worker_id', worker.id);
+      localStorage.setItem('persico_worker_name', worker.name);
+    } else {
+      localStorage.removeItem('persico_worker_id');
+      localStorage.removeItem('persico_worker_name');
+    }
+  } catch(e) { /* localStorage not available */ }
+
+  closeWorkerLogin();
+  startApp();
+}
+
+// ══════════════════════════════════════════════════════════════
+// MIS PERMISOS (trabajador)
+// ══════════════════════════════════════════════════════════════
+window._pmModalidad = 'dias';
+function pmKioskSetModalidad(mod){
+  window._pmModalidad = mod;
+  document.getElementById('pmModDiasBtn').className  = 'btn btn-sm ' + (mod==='dias'  ? 'btn-primary' : 'btn-secondary');
+  document.getElementById('pmModHorasBtn').className = 'btn btn-sm ' + (mod==='horas' ? 'btn-primary' : 'btn-secondary');
+  document.getElementById('pmFieldsDias').style.display  = mod==='dias'  ? 'block' : 'none';
+  document.getElementById('pmFieldsHoras').style.display = mod==='horas' ? 'block' : 'none';
+}
+
+function pmShowAlert(msg, type){
+  const el = document.getElementById('pmSubmitAlert');
+  el.innerHTML = `<div class="alert alert-${type==='error'?'error':'success'}">${msg}</div>`;
+  setTimeout(()=> el.innerHTML='', 5000);
+}
+
+async function pmKioskSubmit(){
+  const tipo = document.getElementById('pmTipo').value;
+  const modalidad = window._pmModalidad || 'dias';
+  const motivo = document.getElementById('pmMotivo').value.trim();
+  const body = { workerId: currentUser.id, tipo, modalidad, motivo };
+
+  if (modalidad === 'dias') {
+    body.fecha_inicio = document.getElementById('pmFechaInicio').value;
+    body.fecha_fin    = document.getElementById('pmFechaFin').value;
+    if (!body.fecha_inicio || !body.fecha_fin) return pmShowAlert('Completa las fechas', 'error');
+  } else {
+    body.fecha       = document.getElementById('pmFechaH').value;
+    body.hora_inicio  = document.getElementById('pmHoraInicio').value;
+    body.hora_fin     = document.getElementById('pmHoraFin').value;
+    if (!body.fecha || !body.hora_inicio || !body.hora_fin) return pmShowAlert('Completa la fecha y el rango de horas', 'error');
+  }
+
+  const btn = document.getElementById('pmSubmitBtn');
+  btn.disabled = true; btn.textContent = 'Enviando…';
+  try {
+    const r = await fetch('/api/permisos', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body) });
+    const data = await r.json();
+    if (!r.ok) { pmShowAlert(data.error || 'Error al enviar la solicitud', 'error'); return; }
+    pmShowAlert('Solicitud enviada ✓ Se avisará a tu Jefe Directo y a RRHH.', 'success');
+    ['pmMotivo','pmFechaInicio','pmFechaFin','pmFechaH','pmHoraInicio','pmHoraFin'].forEach(id => document.getElementById(id).value = '');
+    pmKioskLoadStatus();
+  } catch (e) {
+    pmShowAlert('Error de conexión: ' + e.message, 'error');
+  } finally {
+    btn.disabled = false; btn.textContent = 'Enviar Solicitud →';
+  }
+}
+
+async function pmKioskLoadStatus(){
+  const box = document.getElementById('pmMisSolicitudes');
+  box.innerHTML = 'Cargando…';
+  try {
+    const r = await fetch('/api/permisos/' + currentUser.id);
+    const data = await r.json();
+    if (!r.ok) { box.innerHTML = `<div class="alert alert-error">${data.error || 'Error al consultar'}</div>`; return; }
+    if (!data.length) { box.innerHTML = '<p style="color:var(--ink-soft);font-size:13px;text-align:center;padding:16px">Aún no tienes solicitudes.</p>'; return; }
+    box.innerHTML = data.map(pm => {
+      const periodo  = pm.modalidad === 'horas' ? `${pm.fecha} · ${pm.hora_inicio}-${pm.hora_fin}` : `${pm.fecha_inicio} → ${pm.fecha_fin}`;
+      const cantidad = pm.modalidad === 'horas' ? `${pm.horas} h` : `${pm.dias} día(s)`;
+      const badgeClass = pm.estatus === 'Aprobado' ? 'badge-green' : (pm.estatus.startsWith('Rechazado') ? 'badge-red' : 'badge-amber');
+      return `<div class="card-row">
+        <div style="display:flex;justify-content:space-between;align-items:center">
+          <div class="card-row-title">${pm.tipo}</div>
+          <span class="badge ${badgeClass}">${pm.estatus}</span>
+        </div>
+        <div class="card-row-meta">
+          <span>📅 ${periodo}</span><br>
+          <span>⏱ ${cantidad}</span>
+        </div>
+      </div>`;
+    }).join('');
+  } catch (e) {
+    box.innerHTML = `<div class="alert alert-error">Error de conexión: ${e.message}</div>`;
+  }
+}
+
+// ══════════════════════════════════════════════════════════════
+// NOTIFICACIONES WHATSAPP (CallMeBot) — solo administrador
+// ══════════════════════════════════════════════════════════════
+let notificationsData = [];
+
+async function loadNotifications(){
+  const box = document.getElementById('notificationsBody');
+  box.innerHTML = 'Cargando…';
+  try {
+    const r = await fetch('/api/notifications');
+    notificationsData = await r.json();
+    renderNotificationsRows();
+  } catch (e) {
+    box.innerHTML = `<div class="alert alert-error">Error de conexión: ${e.message}</div>`;
+  }
+}
+
+function renderNotificationsRows(){
+  const box = document.getElementById('notificationsBody');
+  box.innerHTML = notificationsData.map((n, i) => `
+    <div style="display:flex;align-items:flex-end;gap:10px;padding:12px 0;border-bottom:1px solid var(--border);flex-wrap:wrap;">
+      <div style="display:flex;align-items:center;gap:6px;">
+        <input type="checkbox" id="notifActive${i}" ${n.active ? 'checked' : ''} style="width:18px;height:18px;" />
+        <label for="notifActive${i}" style="font-size:11px;color:var(--ink-soft);">Activo</label>
+      </div>
+      <div class="form-group" style="margin-bottom:0;flex:1;min-width:140px;">
+        <label>Nombre / Cargo</label>
+        <input type="text" id="notifName${i}" value="${n.name || ''}" placeholder="Ej. Gerente de Planta" />
+      </div>
+      <div class="form-group" style="margin-bottom:0;flex:1;min-width:150px;">
+        <label>Teléfono (con código de país)</label>
+        <input type="text" id="notifPhone${i}" value="${n.phone || ''}" placeholder="Ej. 5215512345678" />
+      </div>
+      <div class="form-group" style="margin-bottom:0;flex:1;min-width:150px;">
+        <label>CallMeBot API Key</label>
+        <input type="text" id="notifApikey${i}" value="${n.apikey || ''}" placeholder="Ej. 123456" />
+      </div>
+      <button class="btn btn-secondary btn-sm" onclick="testNotification(${i})">📤 Probar</button>
+    </div>
+  `).join('');
+}
+
+async function saveNotifications(){
+  const notifications = notificationsData.map((_, i) => ({
+    name: document.getElementById(`notifName${i}`).value,
+    phone: document.getElementById(`notifPhone${i}`).value,
+    apikey: document.getElementById(`notifApikey${i}`).value,
+    active: document.getElementById(`notifActive${i}`).checked,
+  }));
+  try {
+    const r = await fetch('/api/notifications', {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ notifications }),
+    });
+    if (!r.ok) return toast('Error al guardar', 'error');
+    notificationsData = notifications;
+    const status = document.getElementById('notificationsStatus');
+    status.style.display = 'block';
+    setTimeout(() => status.style.display = 'none', 3000);
+  } catch (e) {
+    toast('Error de conexión: ' + e.message, 'error');
+  }
+}
+
+async function testNotification(i){
+  const phone = document.getElementById(`notifPhone${i}`).value;
+  const apikey = document.getElementById(`notifApikey${i}`).value;
+  if (!phone || !apikey) return toast('Completa teléfono y API Key primero', 'error');
+  // Guarda primero, para probar exactamente lo que está en pantalla
+  await saveNotifications();
+  try {
+    const r = await fetch(`/api/notifications/test/${i}`, { method: 'POST' });
+    const data = await r.json();
+    if (!r.ok) return toast(data.error || 'Error al enviar la prueba', 'error');
+    toast('Mensaje de prueba enviado ✓ Revisa el WhatsApp', 'success');
+  } catch (e) {
+    toast('Error de conexión: ' + e.message, 'error');
+  }
+}
+
+function showLoginAlert(msg, type) {
+  const el = document.getElementById('loginAlert');
+  el.innerHTML = `<div class="alert alert-${type === 'error' ? 'error' : 'success'}">${msg}</div>`;
+  setTimeout(() => el.innerHTML = '', 4000);
+}
+
+function logout() {
+  currentUser = null;
+  stopClock(); stopGeo();
+  document.getElementById('app').style.display = 'none';
+  document.getElementById('loginScreen').style.display = 'flex';
+  document.getElementById('loginUser').value = '';
+  document.getElementById('loginPass').value = '';
+}
+
+// ══════════════════════════════════════════════════════════════
+// APP INIT
+// ══════════════════════════════════════════════════════════════
+async function startApp() {
+  document.getElementById('loginScreen').style.display = 'none';
+  document.getElementById('app').style.display = 'flex';
+  document.getElementById('app').style.flexDirection = 'column';
+  document.getElementById('roleBadge').textContent = ROLE_LABELS[currentUser.role] || currentUser.role;
+  document.getElementById('topUserName').textContent = currentUser.name;
+
+  await loadWorkers();
+  await loadLocations();
+  buildNav();
+
+  // Always initialize date filters so they're ready when reports panel opens
+  const today = new Date().toISOString().split('T')[0];
+  const monthAgo = new Date(Date.now() - 30*86400000).toISOString().split('T')[0];
+  const fFrom = document.getElementById('filterFrom');
+  const fTo   = document.getElementById('filterTo');
+  if (fFrom && !fFrom.value) fFrom.value = monthAgo;
+  if (fTo   && !fTo.value)   fTo.value   = today;
+
+  if (currentUser.role === 'worker') {
+    // Pre-load this worker's records so entrada lookup works for job hours modal
+    const r = await fetch(`/api/records?workerId=${currentUser.id}`);
+    records = await r.json();
+    showPanel('registro');
+    startClock();
+    startGeo();
+    loadMyRecords();
+    document.getElementById('heroWorkerName').textContent = currentUser.name;
+    document.getElementById('heroWorkerPos').textContent = currentUser.position || '';
+    populateWorkerLocationSelect();
+  } else {
+    // Populate report filter first, then render panels
+    populateFilterWorker();
+    renderWorkersTable();
+    renderLocationsTable();
+    showPanel('trabajadores');
+  }
+}
+
+function buildNav() {
+  const tabs = document.getElementById('navTabs');
+  const bottomInner = document.getElementById('bottomNavInner');
+  tabs.innerHTML = '';
+  bottomInner.innerHTML = '';
+
+  const navItems = [];
+  if (currentUser.role === 'worker') {
+    navItems.push({ id:'registro', icon:'⏱', label:'Registro' });
+    navItems.push({ id:'permisos', icon:'📝', label:'Permisos' });
+  } else {
+    if (currentUser.role === 'admin') {
+      navItems.push({ id:'trabajadores', icon:'👷', label:'Trabajadores' });
+      navItems.push({ id:'ubicaciones', icon:'📍', label:'Ubicaciones' });
+      navItems.push({ id:'usuarios',    icon:'🔐', label:'Usuarios' });
+      navItems.push({ id:'notificaciones', icon:'🔔', label:'Notificaciones' });
+    }
+    navItems.push({ id:'reportes', icon:'📊', label:'Reportes' });
+    if (currentUser.role === 'rrhh') {
+      navItems.push({ id:'trabajadores', icon:'👷', label:'Trabajadores' });
+    }
+  }
+
+  navItems.forEach(item => {
+    // Desktop tab
+    const div = document.createElement('div');
+    div.className = 'nav-tab';
+    div.dataset.panel = item.id;
+    div.innerHTML = `${item.icon} ${item.label}`;
+    div.onclick = () => showPanel(item.id);
+    tabs.appendChild(div);
+
+    // Mobile bottom tab
+    const btn = document.createElement('button');
+    btn.className = 'bottom-tab';
+    btn.dataset.panel = item.id;
+    btn.innerHTML = `<span class="tab-icon">${item.icon}</span><span>${item.label}</span>`;
+    btn.onclick = () => showPanel(item.id);
+    bottomInner.appendChild(btn);
+  });
+}
+
+function showPanel(id) {
+  document.querySelectorAll('.panel').forEach(p => p.classList.remove('active'));
+  document.querySelectorAll('.nav-tab, .bottom-tab').forEach(t => t.classList.remove('active'));
+  const panel = document.getElementById(`panel-${id}`);
+  if (panel) panel.classList.add('active');
+  document.querySelectorAll(`[data-panel="${id}"]`).forEach(t => t.classList.add('active'));
+  if (id === 'ubicaciones') setTimeout(initMap, 100);
+  if (id === 'reportes') { populateFilterWorker(); loadReports(); }
+  if (id === 'usuarios') { renderUsersTable().then(() => { loadSigners(); }); }
+  if (id === 'permisos') pmKioskLoadStatus();
+  if (id === 'notificaciones') loadNotifications();
+}
+
+// ══════════════════════════════════════════════════════════════
+// CLOCK
+// ══════════════════════════════════════════════════════════════
+function startClock() {
+  const tick = () => {
+    const now = new Date();
+    document.getElementById('clockDisplay').textContent = now.toLocaleTimeString('es-MX');
+    const days = ['Domingo','Lunes','Martes','Miércoles','Jueves','Viernes','Sábado'];
+    document.getElementById('dateDisplay').textContent = `${days[now.getDay()]}, ${now.toLocaleDateString('es-MX', {day:'2-digit', month:'long', year:'numeric'})}`;
+  };
+  tick(); clockInterval = setInterval(tick, 1000);
+}
+function stopClock() { clearInterval(clockInterval); }
+
+// ══════════════════════════════════════════════════════════════
+// GEO
+// ══════════════════════════════════════════════════════════════
+function startGeo() {
+  checkGeo();
+  geoInterval = setInterval(checkGeo, 10000);
+}
+function stopGeo() { clearInterval(geoInterval); }
+
+function checkGeo() {
+  const status = document.getElementById('geoStatus');
+  status.className = 'geo-status geo-checking';
+  status.innerHTML = '<span>📡</span> Verificando ubicación…';
+  if (!navigator.geolocation) {
+    status.className = 'geo-status geo-fail';
+    status.innerHTML = '<span>❌</span> Geolocalización no disponible';
+    return;
+  }
+  navigator.geolocation.getCurrentPosition(pos => {
+    currentLat = pos.coords.latitude;
+    currentLng = pos.coords.longitude;
+    checkGeofence();
+  }, err => {
+    status.className = 'geo-status geo-fail';
+    status.innerHTML = '<span>❌</span> No se pudo obtener ubicación. Verifique permisos.';
+    disableActionBtns();
+  }, { enableHighAccuracy: true, timeout: 15000 });
+}
+
+function populateWorkerLocationSelect() {
+  const sel = document.getElementById('workerLocationSelect');
+  const locDiv = document.getElementById('locationSelector');
+  const ids = currentUser.locationIds || [];
+  // If no specific locations assigned, worker can use ALL locations
+  const assigned = ids.length > 0 ? locations.filter(l => ids.includes(l.id)) : locations;
+
+  if (assigned.length === 0) {
+    locDiv.style.display = 'none';
+    return;
+  }
+  if (assigned.length === 1) {
+    locDiv.style.display = 'none';
+    currentUser._selectedLocation = assigned[0];
+    return;
+  }
+  // Multiple locations: show selector
+  locDiv.style.display = 'block';
+  sel.innerHTML = '<option value="">— Selecciona punto de registro —</option>';
+  assigned.forEach(l => {
+    const o = document.createElement('option');
+    o.value = l.id;
+    o.textContent = l.name + (l.description ? ` — ${l.description}` : '');
+    sel.appendChild(o);
+  });
+  sel.onchange = () => {
+    currentUser._selectedLocation = locations.find(l => l.id === sel.value) || null;
+    checkGeofence();
+  };
+}
+
+function getActiveLocation() {
+  if (currentUser._selectedLocation) return currentUser._selectedLocation;
+  const ids = currentUser.locationIds || [];
+  const assigned = ids.length > 0 ? locations.filter(l => ids.includes(l.id)) : locations;
+  if (assigned.length === 1) return assigned[0];
+  return null; // multiple → user must select
+}
+
+function checkGeofence() {
+  const status = document.getElementById('geoStatus');
+  const loc = getActiveLocation();
+
+  if (!loc) {
+    status.className = 'geo-status geo-checking';
+    status.innerHTML = '<span>📍</span> Sin punto de registro asignado. Contacte a su supervisor.';
+    disableActionBtns(); return;
+  }
+  if (currentLat === null) return;
+
+  const dist = haversine(currentLat, currentLng, parseFloat(loc.lat), parseFloat(loc.lng));
+  if (dist <= loc.radius) {
+    status.className = 'geo-status geo-ok';
+    status.innerHTML = `<span>✅</span> Dentro de ${loc.name} (${Math.round(dist)} m del centro)`;
+    enableActionBtns();
+  } else {
+    status.className = 'geo-status geo-fail';
+    status.innerHTML = `<span>🚫</span> Fuera de la región autorizada para el registro (${Math.round(dist)} m de distancia)`;
+    disableActionBtns();
+  }
+}
+
+function haversine(lat1, lng1, lat2, lng2) {
+  const R = 6371000;
+  const dLat = (lat2 - lat1) * Math.PI / 180;
+  const dLng = (lng2 - lng1) * Math.PI / 180;
+  const a = Math.sin(dLat/2)**2 + Math.cos(lat1*Math.PI/180) * Math.cos(lat2*Math.PI/180) * Math.sin(dLng/2)**2;
+  return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a));
+}
+
+function enableActionBtns() {
+  document.getElementById('btnEntrada').disabled = false;
+  document.getElementById('btnSalida').disabled = false;
+}
+function disableActionBtns() {
+  document.getElementById('btnEntrada').disabled = true;
+  document.getElementById('btnSalida').disabled = true;
+}
+
+// ══════════════════════════════════════════════════════════════
+// RECORD
+// ══════════════════════════════════════════════════════════════
+async function registerRecord(type) {
+  const loc = getActiveLocation();
+  const now = new Date();
+  const dayOfWeek = now.getDay();
+
+  let totalHours = null, baseHours = null, extraHours = null;
+  if (type === 'salida') {
+    // Find last entrada (could be yesterday for overnight shifts)
+    const myEntradas = records
+      .filter(r => r.workerId === currentUser.id && r.type === 'entrada')
+      .sort((a,b) => new Date(b.timestamp) - new Date(a.timestamp));
+
+    if (myEntradas.length > 0) {
+      const lastEntrada = new Date(myEntradas[0].timestamp);
+      const diffMs = now - lastEntrada;
+
+      // Protect against negative or absurd values (>36h = likely bad data)
+      if (diffMs > 0 && diffMs < 36 * 3600000) {
+        totalHours = Math.round((diffMs / 3600000) * 100) / 100;
+
+        // Use the DAY of entrada for base hours calculation (overnight: base is entrada's day)
+        const entradaDow = lastEntrada.getDay();
+        let baseLimit = 0;
+        if (entradaDow >= 1 && entradaDow <= 4) baseLimit = 10;
+        else if (entradaDow === 5) baseLimit = 8;
+        // Sat/Sun entrada: all extra
+        if (entradaDow === 0 || entradaDow === 6) {
+          baseHours  = 0;
+          extraHours = totalHours;
+        } else {
+          baseHours  = Math.min(totalHours, baseLimit);
+          extraHours = Math.max(0, totalHours - baseLimit);
+        }
+      } else if (diffMs <= 0) {
+        // Clock issue or duplicate — still register salida but with 0 hours
+        totalHours = 0; baseHours = 0; extraHours = 0;
+      }
+    }
+  }
+
+  const record = {
+    workerId: currentUser.id, workerName: currentUser.name, type,
+    lat: currentLat, lng: currentLng,
+    locationId: loc ? loc.id : null, locationName: loc ? loc.name : 'N/A',
+    inGeofence: true, totalHours, baseHours, extraHours, dayOfWeek,
+    timestamp: now.toISOString()
+  };
+
+  try {
+    const r = await fetch('/api/records', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(record) });
+    const data = await r.json();
+    if (r.ok) {
+      toast(`${type === 'entrada' ? '🟢 Entrada' : '🔴 Salida'} registrada correctamente`, 'success');
+      records.push(data.record);
+      loadMyRecords();
+      // Always show job hours modal on salida (even 0h — let user assign ADMIN)
+      if (type === 'salida') {
+        openJobHoursModal(data.record.id, totalHours ?? 0);
+      }
+    } else { toast(data.error, 'error'); }
+  } catch(e) { toast('Error al registrar', 'error'); }
+}
+
+async function loadMyRecords() {
+  const tbody = document.getElementById('myRecordsTable');
+  const myRecs = records.filter(r => r.workerId === currentUser.id).slice(-10).reverse();
+  if (myRecs.length === 0) { tbody.innerHTML = '<p style="color:var(--ink-soft);font-size:13px;">Sin registros aún.</p>'; return; }
+  tbody.innerHTML = `<div class="table-wrap"><table>
+    <thead><tr><th>Tipo</th><th>Fecha</th><th>Hora</th><th>Hrs Jornada</th><th>Hrs Extra</th></tr></thead>
+    <tbody>${myRecs.map(r => {
+      const dt = new Date(r.timestamp);
+      return `<tr>
+        <td><span class="badge ${r.type==='entrada'?'badge-green':'badge-red'}">${r.type==='entrada'?'Entrada':'Salida'}</span></td>
+        <td>${dt.toLocaleDateString('es-MX')}</td>
+        <td>${dt.toLocaleTimeString('es-MX')}</td>
+        <td>${r.totalHours != null ? r.totalHours + ' h' : '—'}</td>
+        <td>${r.extraHours != null ? r.extraHours + ' h' : '—'}</td>
+      </tr>`;
+    }).join('')}</tbody></table></div>`;
+}
+
+// ══════════════════════════════════════════════════════════════
+// JOB HOURS DISTRIBUTION
+// ══════════════════════════════════════════════════════════════
+let pendingJobHoursRecordId = null;
+let pendingJobHoursTotal    = 0;
+
+function openJobHoursModal(recordId, totalHours) {
+  pendingJobHoursRecordId = recordId;
+  pendingJobHoursTotal    = totalHours;
+
+  // Jobs: always start with ADMIN, then the worker's allowedJobs
+  const jobs = ['ADMIN', ...(currentUser.allowedJobs || [])];
+
+  document.getElementById('jobHoursTotalDisplay').textContent    = `${totalHours} h`;
+  document.getElementById('jobHoursAssignedDisplay').textContent = '0 h';
+  document.getElementById('jobHoursAssignedDisplay').style.color = 'var(--ink)';
+  document.getElementById('jobHoursError').style.display         = 'none';
+
+  document.getElementById('jobHoursBody').innerHTML = jobs.map(job => `
+    <div style="display:flex;align-items:center;justify-content:space-between;padding:10px 4px;border-bottom:1px solid var(--border);">
+      <span class="job-tag" style="font-size:14px;padding:5px 12px;">${job}</span>
+      <input type="number" class="job-hours-input" data-job="${job}"
+        min="0" max="${totalHours}" step="0.5" value="0"
+        inputmode="decimal" oninput="updateJobHoursTotals()" />
+    </div>`).join('');
+
+  document.getElementById('jobHoursModal').classList.add('open');
+}
+
+function updateJobHoursTotals() {
+  const inputs  = document.querySelectorAll('.job-hours-input');
+  let assigned  = 0;
+  inputs.forEach(inp => { assigned += parseFloat(inp.value) || 0; });
+  assigned = Math.round(assigned * 100) / 100;
+
+  const over = assigned > pendingJobHoursTotal;
+  document.getElementById('jobHoursAssignedDisplay').textContent = `${assigned} h`;
+  document.getElementById('jobHoursAssignedDisplay').style.color = over ? '#DC2626' : (assigned === pendingJobHoursTotal ? 'var(--green)' : 'var(--ink)');
+  inputs.forEach(inp => inp.classList.toggle('over', over));
+
+  const errEl = document.getElementById('jobHoursError');
+  if (over) {
+    errEl.style.display = 'block';
+    errEl.textContent   = `⚠️ Excede el total de la jornada por ${Math.round((assigned - pendingJobHoursTotal) * 100) / 100} h`;
+  } else {
+    errEl.style.display = 'none';
+  }
+}
+
+async function saveJobHours() {
+  const inputs   = document.querySelectorAll('.job-hours-input');
+  let   assigned = 0;
+  const jobHours = [];
+
+  inputs.forEach(inp => {
+    const h = Math.round((parseFloat(inp.value) || 0) * 100) / 100;
+    assigned += h;
+    if (h > 0) jobHours.push({ job: inp.dataset.job, hours: h });
+  });
+  assigned = Math.round(assigned * 100) / 100;
+
+  if (assigned > pendingJobHoursTotal) {
+    return toast(`Las horas asignadas (${assigned} h) exceden el total de la jornada (${pendingJobHoursTotal} h)`, 'error');
+  }
+
+  // PATCH the salida record to add jobHours
+  try {
+    const r = await fetch(`/api/records/${pendingJobHoursRecordId}`, {
+      method: 'PATCH',
+      headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({ jobHours })
+    });
+    if (r.ok) {
+      const rec = records.find(r => r.id === pendingJobHoursRecordId);
+      if (rec) rec.jobHours = jobHours;
+      toast('Distribución de horas guardada ✓', 'success');
+      closeModal('jobHoursModal');
+      loadMyRecords();
+    } else { toast('Error al guardar la distribución', 'error'); }
+  } catch(e) { toast('Error de conexión', 'error'); }
+}
+
+// ── ADMIN: editar distribución de horas de un día ya registrado ──
+let adminPendingRecordId = null;
+let adminPendingTotal    = 0;
+let adminPendingJobsList = [];
+
+function adminOpenJobHoursModal(dayIndex) {
+  const { worker, days } = jobsReportData;
+  const day = days[dayIndex];
+  if (!day || !day.salidaId) return;
+
+  adminPendingRecordId = day.salidaId;
+  adminPendingTotal    = day.totalHours;
+  adminPendingJobsList = [...new Set(['ADMIN', ...(worker.allowedJobs || []), ...Object.keys(day.jobMap || {})])];
+
+  const dateLabel = day.date.toLocaleDateString('es-MX', { weekday:'long', day:'2-digit', month:'2-digit', year:'numeric' });
+  document.getElementById('adminJobHoursSubtitle').textContent    = `${worker.name} — ${dateLabel}`;
+  document.getElementById('adminJobHoursTotalDisplay').textContent = `${day.totalHours} h`;
+  document.getElementById('adminJobHoursError').style.display     = 'none';
+  document.getElementById('adminNewJobCode').value = '';
+
+  adminRenderJobHoursRows(day.jobMap || {});
+  updateAdminJobHoursTotals();
+  document.getElementById('adminJobHoursModal').classList.add('open');
+}
+
+function adminRenderJobHoursRows(jobMap) {
+  document.getElementById('adminJobHoursBody').innerHTML = adminPendingJobsList.map(job => `
+    <div style="display:flex;align-items:center;justify-content:space-between;padding:10px 4px;border-bottom:1px solid var(--border);">
+      <span class="job-tag" style="font-size:14px;padding:5px 12px;">${job}</span>
+      <input type="number" class="admin-job-hours-input" data-job="${job}"
+        min="0" max="${adminPendingTotal}" step="0.5" value="${jobMap[job] || 0}"
+        inputmode="decimal" oninput="updateAdminJobHoursTotals()" />
+    </div>`).join('');
+}
+
+function adminAddJobRow() {
+  const code = document.getElementById('adminNewJobCode').value.trim().toUpperCase();
+  if (!code) return;
+  if (adminPendingJobsList.includes(code)) { document.getElementById('adminNewJobCode').value = ''; return; }
+  adminPendingJobsList.push(code);
+  const { days } = jobsReportData;
+  const day = days.find(d => d.salidaId === adminPendingRecordId);
+  adminRenderJobHoursRows(day?.jobMap || {});
+  document.getElementById('adminNewJobCode').value = '';
+  updateAdminJobHoursTotals();
+}
+
+function updateAdminJobHoursTotals() {
+  const inputs  = document.querySelectorAll('.admin-job-hours-input');
+  let   assigned = 0;
+  inputs.forEach(inp => { assigned += parseFloat(inp.value) || 0; });
+  assigned = Math.round(assigned * 100) / 100;
+
+  const over = assigned > adminPendingTotal;
+  document.getElementById('adminJobHoursAssignedDisplay').textContent = `${assigned} h`;
+  document.getElementById('adminJobHoursAssignedDisplay').style.color = over ? '#DC2626' : (assigned === adminPendingTotal ? 'var(--green)' : 'var(--ink)');
+  inputs.forEach(inp => inp.classList.toggle('over', over));
+
+  const errEl = document.getElementById('adminJobHoursError');
+  if (over) {
+    errEl.style.display = 'block';
+    errEl.textContent   = `⚠️ Excede el total de la jornada por ${Math.round((assigned - adminPendingTotal) * 100) / 100} h`;
+  } else {
+    errEl.style.display = 'none';
+  }
+}
+
+async function adminSaveJobHours() {
+  if (!adminPendingRecordId) return;
+  const inputs   = document.querySelectorAll('.admin-job-hours-input');
+  let   assigned = 0;
+  const jobHours = [];
+
+  inputs.forEach(inp => {
+    const h = Math.round((parseFloat(inp.value) || 0) * 100) / 100;
+    assigned += h;
+    if (h > 0) jobHours.push({ job: inp.dataset.job, hours: h });
+  });
+  assigned = Math.round(assigned * 100) / 100;
+
+  if (assigned > adminPendingTotal) {
+    return toast(`Las horas asignadas (${assigned} h) exceden el total de la jornada (${adminPendingTotal} h)`, 'error');
+  }
+
+  try {
+    const r = await fetch(`/api/records/${adminPendingRecordId}`, {
+      method: 'PATCH',
+      headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({ jobHours })
+    });
+    if (r.ok) {
+      toast('Distribución actualizada ✓', 'success');
+      closeModal('adminJobHoursModal');
+      loadJobsReport();
+    } else { toast('Error al guardar la distribución', 'error'); }
+  } catch(e) { toast('Error de conexión', 'error'); }
+}
+
+// ══════════════════════════════════════════════════════════════
+// USERS
+// ══════════════════════════════════════════════════════════════
+let systemUsers = [];
+
+async function loadUsers() {
+  const r = await fetch('/api/users');
+  systemUsers = await r.json();
+}
+
+async function renderUsersTable() {
+  await loadUsers();
+  const roleLabels = { admin: '🔴 Administrador', rrhh: '🟡 RRHH', worker: '🟢 Trabajador' };
+  const roleBadgeClass = { admin: 'badge-red', rrhh: 'badge-amber', worker: 'badge-green' };
+
+  // Desktop table
+  const tbody = document.getElementById('usersBody');
+  if (tbody) {
+    tbody.innerHTML = systemUsers.map(u => `<tr>
+      <td><strong>${u.name}</strong></td>
+      <td style="font-family:monospace;font-size:12px;">${u.username}</td>
+      <td><span class="badge ${roleBadgeClass[u.role] || 'badge-amber'}">${roleLabels[u.role] || u.role}</span></td>
+      <td style="display:flex;gap:6px;">
+        <button class="btn btn-secondary btn-sm" onclick="editUser('${u.id}')">✏️ Editar</button>
+        ${u.id !== currentUser.id ? `<button class="btn btn-danger btn-sm" onclick="deleteUser('${u.id}','${u.name}')">🗑</button>` : '<span style="font-size:11px;color:var(--ink-soft);">Tu cuenta</span>'}
+      </td>
+    </tr>`).join('');
+  }
+
+  // Mobile card-rows
+  const cards = document.getElementById('usersCards');
+  if (cards) {
+    cards.innerHTML = systemUsers.map(u => `<div class="card-row">
+      <div style="display:flex;justify-content:space-between;align-items:center;">
+        <div class="card-row-title">${u.name}</div>
+        <span class="badge ${roleBadgeClass[u.role] || 'badge-amber'}">${roleLabels[u.role] || u.role}</span>
+      </div>
+      <div class="card-row-meta"><span>👤 ${u.username}</span></div>
+      <div class="card-row-actions">
+        <button class="btn btn-secondary btn-sm" onclick="editUser('${u.id}')">✏️ Editar</button>
+        ${u.id !== currentUser.id ? `<button class="btn btn-danger btn-sm" onclick="deleteUser('${u.id}','${u.name}')">🗑 Eliminar</button>` : ''}
+      </div>
+    </div>`).join('');
+  }
+}
+
+function openAddUser() {
+  document.getElementById('userModalTitle').textContent = '🔐 Nuevo Usuario';
+  document.getElementById('uId').value = '';
+  document.getElementById('uName').value = '';
+  document.getElementById('uUsername').value = '';
+  document.getElementById('uPassword').value = '';
+  document.getElementById('uRole').value = 'worker';
+  document.getElementById('uPasswordHint').style.display = 'none';
+  document.getElementById('userModal').classList.add('open');
+}
+
+function editUser(id) {
+  const u = systemUsers.find(x => x.id === id);
+  if (!u) return;
+  document.getElementById('userModalTitle').textContent = '✏️ Editar Usuario';
+  document.getElementById('uId').value = u.id;
+  document.getElementById('uName').value = u.name;
+  document.getElementById('uUsername').value = u.username;
+  document.getElementById('uPassword').value = '';
+  document.getElementById('uRole').value = u.role;
+  document.getElementById('uPasswordHint').style.display = 'inline';
+  document.getElementById('userModal').classList.add('open');
+}
+
+async function saveUser() {
+  const id = document.getElementById('uId').value;
+  const data = {
+    name: document.getElementById('uName').value.trim(),
+    username: document.getElementById('uUsername').value.trim(),
+    password: document.getElementById('uPassword').value,
+    role: document.getElementById('uRole').value
+  };
+  if (!data.name || !data.username) return toast('Nombre y usuario son requeridos', 'error');
+  if (!id && !data.password) return toast('La contraseña es requerida para usuarios nuevos', 'error');
+  const url = id ? `/api/users/${id}` : '/api/users';
+  const method = id ? 'PUT' : 'POST';
+  const r = await fetch(url, { method, headers:{'Content-Type':'application/json'}, body: JSON.stringify(data) });
+  const result = await r.json();
+  if (r.ok) {
+    toast(id ? 'Usuario actualizado ✓' : 'Usuario creado ✓', 'success');
+    closeModal('userModal');
+    renderUsersTable();
+  } else { toast(result.error, 'error'); }
+}
+
+async function deleteUser(id, name) {
+  if (!confirm(`¿Eliminar el usuario "${name}"? Esta acción no se puede deshacer.`)) return;
+  const r = await fetch(`/api/users/${id}`, { method:'DELETE' });
+  if (r.ok) { toast('Usuario eliminado', 'success'); renderUsersTable(); }
+  else { const d = await r.json(); toast(d.error, 'error'); }
+}
+
+// ══════════════════════════════════════════════════════════════
+// WORKERS
+// ══════════════════════════════════════════════════════════════
+async function loadWorkers() {
+  const r = await fetch('/api/workers');
+  workers = await r.json();
+}
+
+function getWorkerLocationNames(w) {
+  const ids = w.locationIds || (w.locationId ? [w.locationId] : []);
+  if (!ids.length) return '<span style="color:var(--ink-soft)">Sin asignar</span>';
+  return ids.map(id => {
+    const loc = locations.find(l => l.id === id);
+    return loc ? `<span class="badge badge-amber" style="margin:1px;">${loc.name}</span>` : '';
+  }).filter(Boolean).join(' ');
+}
+function renderWorkersTable(filter='') {
+  filteredWorkers = filter ? workers.filter(w => w.name.toLowerCase().includes(filter) || w.position.toLowerCase().includes(filter)) : [...workers];
+
+  // Desktop table
+  const tbody = document.getElementById('workersBody');
+  if (tbody) {
+    if (filteredWorkers.length === 0) {
+      tbody.innerHTML = `<tr><td colspan="5" style="text-align:center;color:var(--ink-soft);padding:32px;">Sin trabajadores registrados</td></tr>`;
+    } else {
+      tbody.innerHTML = filteredWorkers.map(w => {
+        const jobs = (w.allowedJobs || []);
+        const jobsHtml = jobs.length ? jobs.map(j => `<span class="badge badge-amber" style="margin:1px;font-size:10px;">${j}</span>`).join(' ') : '<span style="color:var(--ink-soft);font-size:12px;">—</span>';
+        return `<tr>
+          <td><strong>${w.name}</strong></td>
+          <td>${w.position || '—'}</td>
+          <td>${w.area ? `<span class="badge badge-green">${w.area}</span>` : '<span style="color:var(--ink-soft)">—</span>'}</td>
+          <td>${jobsHtml}</td>
+          <td>${w.shiftStart || '07:00'} – ${w.shiftEnd || '17:00'}</td>
+          <td>${getWorkerLocationNames(w)}</td>
+          <td style="display:flex;gap:6px;">
+            <button class="btn btn-secondary btn-sm" onclick="editWorker('${w.id}')">✏️ Editar</button>
+            <button class="btn btn-danger btn-sm" onclick="deleteWorker('${w.id}')">🗑</button>
+          </td>
+        </tr>`;
+      }).join('');
+    }
+  }
+
+  // Mobile card-rows
+  const cards = document.getElementById('workersCards');
+  if (cards) {
+    if (filteredWorkers.length === 0) {
+      cards.innerHTML = `<p style="color:var(--ink-soft);font-size:13px;text-align:center;padding:24px;">Sin trabajadores registrados</p>`;
+    } else {
+      cards.innerHTML = filteredWorkers.map(w => {
+        const jobs = (w.allowedJobs || []);
+        const jobsStr = jobs.length ? jobs.join(', ') : '—';
+        return `<div class="card-row">
+          <div class="card-row-title">${w.name}</div>
+          <div class="card-row-meta">
+            <span>💼 ${w.position || '—'}</span><br>
+            <span>🏭 ${w.area || '—'}</span><br>
+            <span>🗂 Jobs: <strong>${jobsStr}</strong></span><br>
+            <span>⏰ ${w.shiftStart || '07:00'} – ${w.shiftEnd || '17:00'}</span><br>
+            <span>📍 ${getWorkerLocationNames(w)}</span>
+          </div>
+          <div class="card-row-actions">
+            <button class="btn btn-secondary btn-sm" onclick="editWorker('${w.id}')">✏️ Editar</button>
+            <button class="btn btn-danger btn-sm" onclick="deleteWorker('${w.id}')">🗑 Eliminar</button>
+          </div>
+        </div>`;
+      }).join('');
+    }
+  }
+}
+
+function filterWorkers(v) { renderWorkersTable(v.toLowerCase()); }
+
+function openAddWorker() {
+  document.getElementById('workerModalTitle').textContent = 'Nuevo Trabajador';
+  document.getElementById('wId').value = '';
+  document.getElementById('wName').value = '';
+  document.getElementById('wPosition').value = '';
+  document.getElementById('wArea').value = '';
+  document.getElementById('wAllowedJobs').value = '';
+  document.getElementById('wShiftStart').value = '07:00';
+  document.getElementById('wShiftEnd').value = '17:00';
+  renderLocationCheckboxes([]);
+  document.getElementById('workerModal').classList.add('open');
+}
+
+function editWorker(id) {
+  const w = workers.find(x => x.id === id);
+  if (!w) return;
+  document.getElementById('workerModalTitle').textContent = 'Editar Trabajador';
+  document.getElementById('wId').value = w.id;
+  document.getElementById('wName').value = w.name;
+  document.getElementById('wPosition').value = w.position || '';
+  document.getElementById('wArea').value = w.area || '';
+  document.getElementById('wAllowedJobs').value = (w.allowedJobs || []).join(', ');
+  document.getElementById('wShiftStart').value = w.shiftStart || '07:00';
+  document.getElementById('wShiftEnd').value = w.shiftEnd || '17:00';
+  const selected = w.locationIds || (w.locationId ? [w.locationId] : []);
+  renderLocationCheckboxes(selected);
+  document.getElementById('workerModal').classList.add('open');
+}
+
+function renderLocationCheckboxes(selectedIds = []) {
+  const container = document.getElementById('wLocationsCheckboxes');
+  if (!locations.length) {
+    container.innerHTML = '<span style="color:var(--ink-soft);font-size:12px;">Sin ubicaciones configuradas. Agrega puntos de registro primero.</span>';
+    return;
+  }
+  container.innerHTML = locations.map(l => {
+    const checked = selectedIds.includes(l.id);
+    return `
+    <div class="loc-check-item ${checked ? 'selected' : ''}" data-id="${l.id}" onclick="toggleLocationCheck(this)">
+      <div class="loc-check-box">${checked ? '✓' : ''}</div>
+      <div class="loc-check-label">
+        <strong>${l.name}</strong>
+        ${l.description ? `<span class="loc-check-desc">— ${l.description}</span>` : ''}
+      </div>
+    </div>`;
+  }).join('');
+}
+
+function toggleLocationCheck(el) {
+  el.classList.toggle('selected');
+  const box = el.querySelector('.loc-check-box');
+  box.textContent = el.classList.contains('selected') ? '✓' : '';
+}
+
+function getSelectedLocationIds() {
+  return Array.from(document.querySelectorAll('#wLocationsCheckboxes .loc-check-item.selected')).map(el => el.dataset.id);
+}
+
+async function saveWorker() {
+  const id = document.getElementById('wId').value;
+  const locationIds = getSelectedLocationIds();
+  const jobsRaw = document.getElementById('wAllowedJobs').value;
+  const allowedJobs = jobsRaw.split(',').map(s => s.trim()).filter(Boolean);
+  const data = {
+    name: document.getElementById('wName').value.trim(),
+    position: document.getElementById('wPosition').value.trim(),
+    area: document.getElementById('wArea').value,
+    allowedJobs,
+    shiftStart: document.getElementById('wShiftStart').value,
+    shiftEnd: document.getElementById('wShiftEnd').value,
+    locationIds,
+    locationId: locationIds[0] || ''
+  };
+  if (!data.name) return toast('El nombre es requerido', 'error');
+  const url = id ? `/api/workers/${id}` : '/api/workers';
+  const method = id ? 'PUT' : 'POST';
+  const r = await fetch(url, { method, headers:{'Content-Type':'application/json'}, body: JSON.stringify(data) });
+  if (r.ok) {
+    toast(id ? 'Trabajador actualizado' : 'Trabajador creado', 'success');
+    await loadWorkers(); renderWorkersTable(); closeModal('workerModal');
+    populateFilterWorker();
+  } else { const d = await r.json(); toast(d.error, 'error'); }
+}
+
+async function deleteWorker(id) {
+  if (!confirm('¿Eliminar este trabajador?')) return;
+  await fetch(`/api/workers/${id}`, { method:'DELETE' });
+  await loadWorkers(); renderWorkersTable(); toast('Trabajador eliminado', 'success');
+}
+
+async function downloadTemplate() {
+  window.open('/api/workers/template', '_blank');
+}
+
+async function uploadWorkers(e) {
+  const file = e.target.files[0];
+  if (!file) return;
+  const fd = new FormData(); fd.append('file', file);
+  const r = await fetch('/api/workers/upload', { method:'POST', body: fd });
+  const data = await r.json();
+  if (r.ok) { toast(`✅ ${data.added} trabajadores importados`, 'success'); await loadWorkers(); renderWorkersTable(); populateFilterWorker(); }
+  else toast(data.error, 'error');
+  e.target.value = '';
+}
+
+// ══════════════════════════════════════════════════════════════
+// LOCATIONS
+// ══════════════════════════════════════════════════════════════
+async function loadLocations() {
+  const r = await fetch('/api/locations');
+  locations = await r.json();
+}
+
+function renderLocationsTable() {
+  // Desktop table
+  const tbody = document.getElementById('locationsBody');
+  if (tbody) {
+    if (locations.length === 0) {
+      tbody.innerHTML = `<tr><td colspan="5" style="text-align:center;color:var(--ink-soft);padding:32px;">Sin ubicaciones registradas</td></tr>`;
+    } else {
+      tbody.innerHTML = locations.map(l => `<tr>
+        <td><strong>${l.name}</strong></td>
+        <td>${l.description || '—'}</td>
+        <td style="font-size:12px;font-family:monospace;">${parseFloat(l.lat).toFixed(5)}, ${parseFloat(l.lng).toFixed(5)}</td>
+        <td>${l.radius || 150} m</td>
+        <td style="display:flex;gap:6px;">
+          <button class="btn btn-secondary btn-sm" onclick="editLocation('${l.id}')">✏️</button>
+          <button class="btn btn-danger btn-sm" onclick="deleteLocation('${l.id}')">🗑</button>
+        </td>
+      </tr>`).join('');
+    }
+  }
+
+  // Mobile card-rows
+  const cards = document.getElementById('locationsCards');
+  if (cards) {
+    if (locations.length === 0) {
+      cards.innerHTML = `<p style="color:var(--ink-soft);font-size:13px;text-align:center;padding:24px;">Sin ubicaciones registradas</p>`;
+    } else {
+      cards.innerHTML = locations.map(l => `<div class="card-row">
+        <div class="card-row-title">${l.name}</div>
+        <div class="card-row-meta">
+          <span>📝 ${l.description || '—'}</span><br>
+          <span>🗺 ${parseFloat(l.lat).toFixed(5)}, ${parseFloat(l.lng).toFixed(5)}</span><br>
+          <span>📏 Radio: ${l.radius || 150} m</span>
+        </div>
+        <div class="card-row-actions">
+          <button class="btn btn-secondary btn-sm" onclick="editLocation('${l.id}')">✏️ Editar</button>
+          <button class="btn btn-danger btn-sm" onclick="deleteLocation('${l.id}')">🗑 Eliminar</button>
+        </div>
+      </div>`).join('');
+    }
+  }
+
+  updateMap();
+}
+
+let mapInit = false;
+function initMap() {
+  if (!document.getElementById('map')) return;
+  if (!mapInit) {
+    mapInstance = L.map('map').setView([19.432608, -99.133208], 12);
+    L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', { attribution:'© OpenStreetMap' }).addTo(mapInstance);
+    mapInit = true;
+  }
+  updateMap();
+}
+
+function updateMap() {
+  if (!mapInstance) return;
+  mapCircles.forEach(c => c.remove());
+  mapMarkers.forEach(m => m.remove());
+  mapCircles = []; mapMarkers = [];
+  locations.forEach(l => {
+    const lat = parseFloat(l.lat), lng = parseFloat(l.lng);
+    const marker = L.marker([lat, lng]).addTo(mapInstance).bindPopup(`<b>${l.name}</b><br>${l.description || ''}<br>Radio: ${l.radius || 150} m`);
+    const circle = L.circle([lat, lng], { radius: l.radius || 150, color: '#C8102E', fillColor: '#C8102E', fillOpacity: 0.15 }).addTo(mapInstance);
+    mapCircles.push(circle); mapMarkers.push(marker);
+  });
+  if (locations.length > 0) {
+    const bounds = mapMarkers.map(m => m.getLatLng());
+    mapInstance.fitBounds(bounds, { padding: [60,60], maxZoom: 16 });
+  }
+}
+
+function openAddLocation() {
+  document.getElementById('lId').value = '';
+  document.getElementById('lName').value = '';
+  document.getElementById('lDesc').value = '';
+  document.getElementById('lLat').value = '';
+  document.getElementById('lLng').value = '';
+  document.getElementById('mapModal').classList.add('open');
+  setTimeout(initLocationMap, 200);
+}
+
+function editLocation(id) {
+  const l = locations.find(x => x.id === id);
+  if (!l) return;
+  document.getElementById('lId').value = l.id;
+  document.getElementById('lName').value = l.name;
+  document.getElementById('lDesc').value = l.description || '';
+  document.getElementById('lLat').value = l.lat;
+  document.getElementById('lLng').value = l.lng;
+  document.getElementById('mapModal').classList.add('open');
+  setTimeout(() => {
+    initLocationMap();
+    placePickerMarker(parseFloat(l.lat), parseFloat(l.lng));
+  }, 200);
+}
+
+async function deleteLocation(id) {
+  if (!confirm('¿Eliminar esta ubicación?')) return;
+  await fetch(`/api/locations/${id}`, { method:'DELETE' });
+  await loadLocations(); renderLocationsTable(); toast('Ubicación eliminada', 'success');
+}
+
+let locationMapInit = false;
+function initLocationMap() {
+  if (!locationMapInit) {
+    locationMapInstance = L.map('locationMap').setView([19.432608, -99.133208], 13);
+    L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', { attribution:'© OpenStreetMap' }).addTo(locationMapInstance);
+    locationMapInstance.on('click', e => {
+      document.getElementById('lLat').value = e.latlng.lat.toFixed(6);
+      document.getElementById('lLng').value = e.latlng.lng.toFixed(6);
+      placePickerMarker(e.latlng.lat, e.latlng.lng);
+    });
+    locationMapInit = true;
+  }
+  locationMapInstance.invalidateSize();
+}
+
+function placePickerMarker(lat, lng) {
+  if (locationPickerMarker) locationPickerMarker.remove();
+  if (locationPickerCircle) locationPickerCircle.remove();
+  locationPickerMarker = L.marker([lat, lng]).addTo(locationMapInstance);
+  locationPickerCircle = L.circle([lat, lng], { radius: 150, color: '#C8102E', fillColor: '#C8102E', fillOpacity: 0.2 }).addTo(locationMapInstance);
+  locationMapInstance.setView([lat, lng], 16);
+}
+
+function useMyLocation() {
+  navigator.geolocation.getCurrentPosition(pos => {
+    document.getElementById('lLat').value = pos.coords.latitude.toFixed(6);
+    document.getElementById('lLng').value = pos.coords.longitude.toFixed(6);
+    placePickerMarker(pos.coords.latitude, pos.coords.longitude);
+  }, () => toast('No se pudo obtener ubicación', 'error'));
+}
+
+async function saveLocation() {
+  const id = document.getElementById('lId').value;
+  const data = {
+    name: document.getElementById('lName').value.trim(),
+    description: document.getElementById('lDesc').value.trim(),
+    lat: document.getElementById('lLat').value,
+    lng: document.getElementById('lLng').value,
+    radius: 150
+  };
+  if (!data.name || !data.lat || !data.lng) return toast('Complete nombre y coordenadas', 'error');
+  const url = id ? `/api/locations/${id}` : '/api/locations';
+  const method = id ? 'PUT' : 'POST';
+  const r = await fetch(url, { method, headers:{'Content-Type':'application/json'}, body: JSON.stringify(data) });
+  if (r.ok) {
+    toast('Ubicación guardada ✓', 'success');
+    await loadLocations(); renderLocationsTable(); closeModal('mapModal');
+    locationMapInit = false;
+  } else { const d = await r.json(); toast(d.error, 'error'); }
+}
+
+// ══════════════════════════════════════════════════════════════
+// REPORTS
+// ══════════════════════════════════════════════════════════════
+function populateFilterWorker() {
+  const sel = document.getElementById('filterWorker');
+  if (sel) {
+    const currentVal = sel.value;
+    sel.innerHTML = '<option value="">Todos</option>';
+    workers.forEach(w => {
+      const o = document.createElement('option');
+      o.value = w.id; o.textContent = w.name;
+      if (w.id === currentVal) o.selected = true;
+      sel.appendChild(o);
+    });
+  }
+  // Also refresh weekly worker select if visible
+  const wSel = document.getElementById('weeklyWorker');
+  if (wSel) {
+    const curW = wSel.value;
+    wSel.innerHTML = '<option value="">— Selecciona un trabajador —</option>';
+    workers.forEach(w => {
+      const o = document.createElement('option');
+      o.value = w.id; o.textContent = `${w.name} — ${w.position || ''}`;
+      if (w.id === curW) o.selected = true;
+      wSel.appendChild(o);
+    });
+  }
+}
+
+async function loadReports() {
+  return loadReportsWithEdit();
+}
+
+function renderRecordsTable(recs) {
+  const workerMap = {};
+  workers.forEach(w => workerMap[w.id] = w);
+  const days = ['Dom','Lun','Mar','Mié','Jue','Vie','Sáb'];
+  const recList = (recs || []).slice().reverse().slice(0,200);
+
+  const emptyMsg = `<tr><td colspan="10" style="text-align:center;color:var(--ink-soft);padding:32px;">Sin registros en el período seleccionado</td></tr>`;
+  const emptyCard = `<p style="color:var(--ink-soft);font-size:13px;text-align:center;padding:24px;">Sin registros en el período seleccionado</p>`;
+
+  // Desktop table
+  const tbody = document.getElementById('recordsBody');
+  if (tbody) {
+    const isAdmin = currentUser?.role === 'admin';
+    tbody.innerHTML = recList.length === 0 ? emptyMsg : recList.map(r => {
+      const w = workerMap[r.workerId] || {};
+      const dt = new Date(r.timestamp);
+      return `<tr>
+        <td><strong>${w.name || r.workerName || '—'}</strong></td>
+        <td>${dt.toLocaleDateString('es-MX')}</td>
+        <td>${days[dt.getDay()]}</td>
+        <td>${dt.toLocaleTimeString('es-MX')}</td>
+        <td><span class="badge ${r.type==='entrada'?'badge-green':'badge-red'}">${r.type==='entrada'?'Entrada':'Salida'}</span></td>
+        <td>${r.totalHours != null ? r.totalHours+' h' : '—'}</td>
+        <td>${r.baseHours != null ? r.baseHours+' h' : '—'}</td>
+        <td>${r.extraHours != null ? r.extraHours+' h' : '—'}</td>
+        <td>${r.locationName || '—'}</td>
+        <td><span class="badge ${r.inGeofence?'badge-green':'badge-red'}">${r.inGeofence?'✓':'✗'}</span></td>
+        ${isAdmin ? `<td style="display:flex;gap:4px;"><button class="btn btn-secondary btn-sm" onclick="editRecord('${r.id}')">✏️</button><button class="btn btn-danger btn-sm" onclick="deleteRecord('${r.id}')">🗑</button></td>` : ''}
+      </tr>`;
+    }).join('');
+  }
+
+  // Mobile card-rows
+  const cards = document.getElementById('recordsCards');
+  if (cards) {
+    const isAdmin = currentUser?.role === 'admin';
+    cards.innerHTML = recList.length === 0 ? emptyCard : recList.map(r => {
+      const w = workerMap[r.workerId] || {};
+      const dt = new Date(r.timestamp);
+      const isEntrada = r.type === 'entrada';
+      return `<div class="card-row">
+        <div style="display:flex;justify-content:space-between;align-items:flex-start;">
+          <div class="card-row-title">${w.name || r.workerName || '—'}</div>
+          <span class="badge ${isEntrada?'badge-green':'badge-red'}">${isEntrada?'Entrada':'Salida'}</span>
+        </div>
+        <div class="card-row-meta">
+          <span>📅 ${days[dt.getDay()]} ${dt.toLocaleDateString('es-MX')} · ${dt.toLocaleTimeString('es-MX')}</span><br>
+          ${r.totalHours != null ? `<span>⏱ Jornada: <strong>${r.totalHours} h</strong> · Base: ${r.baseHours} h · Extra: ${r.extraHours} h</span><br>` : ''}
+          <span>📍 ${r.locationName || '—'} · Geocerca: ${r.inGeofence ? '✅' : '❌'}</span>
+        </div>
+        ${isAdmin ? `<div class="card-row-actions"><button class="btn btn-secondary btn-sm" onclick="editRecord('${r.id}')">✏️ Editar</button><button class="btn btn-danger btn-sm" onclick="deleteRecord('${r.id}')">🗑 Eliminar</button></div>` : ''}
+      </div>`;
+    }).join('');
+  }
+}
+
+function exportRecords(format) {
+  const workerId = document.getElementById('filterWorker')?.value || '';
+  const from = document.getElementById('filterFrom')?.value || '';
+  const to = document.getElementById('filterTo')?.value || '';
+  let url = `/api/records/export?format=${format}`;
+  if (workerId) url += `&workerId=${workerId}`;
+  if (from) url += `&from=${from}`;
+  if (to) url += `&to=${to}`;
+  window.open(url, '_blank');
+}
+
+// ══════════════════════════════════════════════════════════════
+// RECORD EDIT / DELETE (Admin only)
+// ══════════════════════════════════════════════════════════════
+let editingRecords = []; // store last fetched for edit lookup
+
+async function loadReportsWithEdit() {
+  // Store records for edit lookup
+  const workerId = document.getElementById('filterWorker')?.value || '';
+  const from = document.getElementById('filterFrom')?.value || '';
+  const to   = document.getElementById('filterTo')?.value   || '';
+  let url = '/api/records?';
+  if (workerId) url += `workerId=${workerId}&`;
+  if (from)     url += `from=${from}&`;
+  if (to)       url += `to=${to}&`;
+  const r    = await fetch(url);
+  const recs = await r.json();
+  editingRecords = recs;
+  renderRecordsTable(recs);
+  // Show admin col header
+  const adminCol = document.getElementById('recordsAdminCol');
+  if (adminCol && currentUser?.role === 'admin') adminCol.textContent = 'Acciones';
+  document.getElementById('statTotal').textContent    = recs.length;
+  document.getElementById('statEntradas').textContent = recs.filter(r=>r.type==='entrada').length;
+  document.getElementById('statSalidas').textContent  = recs.filter(r=>r.type==='salida').length;
+}
+
+function editRecord(id) {
+  const rec = editingRecords.find(r => r.id === id);
+  if (!rec) return toast('Registro no encontrado', 'error');
+  const w = workers.find(w => w.id === rec.workerId);
+  document.getElementById('erRecordId').value    = rec.id;
+  document.getElementById('erWorkerName').value  = w ? w.name : (rec.workerName || '—');
+  document.getElementById('erType').value        = rec.type;
+  document.getElementById('erTotalHours').value  = rec.totalHours || '';
+  // Convert ISO timestamp to datetime-local format
+  const dt = new Date(rec.timestamp);
+  const local = new Date(dt.getTime() - dt.getTimezoneOffset() * 60000).toISOString().slice(0,16);
+  document.getElementById('erTimestamp').value   = local;
+  document.getElementById('editRecordModal').classList.add('open');
+}
+
+async function saveRecord() {
+  const id         = document.getElementById('erRecordId').value;
+  const type       = document.getElementById('erType').value;
+  const tsLocal    = document.getElementById('erTimestamp').value;
+  const manualHrs  = parseFloat(document.getElementById('erTotalHours').value);
+
+  if (!tsLocal) return toast('La fecha y hora son requeridas', 'error');
+  const timestamp = new Date(tsLocal).toISOString();
+  const dayOfWeek = new Date(tsLocal).getDay();
+
+  // Recalculate hours if salida and manual hours not set
+  let totalHours = isNaN(manualHrs) ? null : manualHrs;
+  let baseHours = null, extraHours = null;
+  if (type === 'salida' && totalHours !== null) {
+    let baseLimit = 0;
+    if (dayOfWeek >= 1 && dayOfWeek <= 4) baseLimit = 10;
+    else if (dayOfWeek === 5) baseLimit = 8;
+    baseHours  = dayOfWeek === 0 || dayOfWeek === 6 ? 0 : Math.min(totalHours, baseLimit);
+    extraHours = dayOfWeek === 0 || dayOfWeek === 6 ? totalHours : Math.max(0, totalHours - baseLimit);
+  }
+
+  const r = await fetch(`/api/records/${id}`, {
+    method: 'PATCH',
+    headers: {'Content-Type':'application/json'},
+    body: JSON.stringify({ type, timestamp, dayOfWeek, totalHours, baseHours, extraHours })
+  });
+  if (r.ok) {
+    toast('Registro actualizado ✓', 'success');
+    closeModal('editRecordModal');
+    loadReportsWithEdit();
+  } else { toast('Error al actualizar', 'error'); }
+}
+
+async function deleteRecord(id) {
+  if (!confirm('¿Eliminar este registro? Esta acción no se puede deshacer.')) return;
+  const r = await fetch(`/api/records/${id}`, { method: 'DELETE' });
+  if (r.ok) { toast('Registro eliminado', 'success'); loadReportsWithEdit(); }
+  else toast('Error al eliminar', 'error');
+}
+
+// ══════════════════════════════════════════════════════════════
+// WEEKLY REPORT
+// ══════════════════════════════════════════════════════════════
+function switchReportTab(tab) {
+  document.querySelectorAll('.report-subtab').forEach(t => t.classList.remove('active'));
+  document.querySelector(`.report-subtab[data-sub="${tab}"]`).classList.add('active');
+  document.getElementById('sub-general').style.display = tab === 'general' ? '' : 'none';
+  document.getElementById('sub-semanal').style.display = tab === 'semanal' ? '' : 'none';
+  document.getElementById('sub-jobs').style.display    = tab === 'jobs'    ? '' : 'none';
+  document.getElementById('sub-control').style.display = tab === 'control' ? '' : 'none';
+  if (tab === 'semanal') {
+    populateFilterWorker();
+    const now = new Date();
+    const wy = document.getElementById('weeklyYear');
+    const ww = document.getElementById('weeklyWeek');
+    if (!wy.value) wy.value = now.getFullYear();
+    if (!ww.value) ww.value = getISOWeek(now);
+    loadSigners();
+  }
+  if (tab === 'jobs') {
+    populateFilterWorker();
+    const jSel = document.getElementById('jobsFilterWorker');
+    if (jSel) {
+      jSel.innerHTML = '<option value="">— Selecciona un trabajador —</option>';
+      workers.forEach(w => {
+        const o = document.createElement('option');
+        o.value = w.id; o.textContent = `${w.name} — ${w.position || ''}`;
+        jSel.appendChild(o);
+      });
+    }
+    const now = new Date();
+    const jw = document.getElementById('jobsFilterWeek');
+    const jy = document.getElementById('jobsFilterYear');
+    if (!jw.value) jw.value = getISOWeek(now);
+    if (!jy.value) jy.value = now.getFullYear();
+  }
+  if (tab === 'control') { initControlTab(); }
+}
+
+function setWeeklyMode(mode) {
+  document.getElementById('modeIndividual').classList.toggle('active', mode === 'individual');
+  document.getElementById('modeArea').classList.toggle('active', mode === 'area');
+  document.getElementById('weeklyModeIndividual').style.display = mode === 'individual' ? '' : 'none';
+  document.getElementById('weeklyModeArea').style.display       = mode === 'area'       ? '' : 'none';
+  document.getElementById('weeklyReportPreview').style.display  = 'none';
+}
+
+// ══════════════════════════════════════════════════════════════
+// WEEKLY REPORT — helpers
+// ══════════════════════════════════════════════════════════════
+function getISOWeek(date) {
+  const d = new Date(Date.UTC(date.getFullYear(), date.getMonth(), date.getDate()));
+  d.setUTCDate(d.getUTCDate() + 4 - (d.getUTCDay() || 7));
+  const yearStart = new Date(Date.UTC(d.getUTCFullYear(), 0, 1));
+  return Math.ceil((((d - yearStart) / 86400000) + 1) / 7);
+}
+
+function getMondayOfWeek(week, year) {
+  const jan4 = new Date(year, 0, 4);
+  const dayOfWeek = jan4.getDay() || 7;
+  const monday = new Date(jan4);
+  monday.setDate(jan4.getDate() - dayOfWeek + 1 + (week - 1) * 7);
+  return monday;
+}
+
+function timeStrToExcelFraction(timeStr) {
+  const [h, m] = timeStr.split(':').map(Number);
+  return (h * 60 + m) / 1440;
+}
+
+function dateToExcelSerial(date) {
+  return Math.round((date - new Date(1899, 11, 30)) / 86400000);
+}
+
+// Build day-by-day array for one worker given a list of records
+function buildWorkerDays(weekRecords, monday) {
+  const DAY_NAMES  = ['LUNES','MARTES','MIÉRCOLES','JUEVES','VIERNES','SÁBADO','DOMINGO'];
+  const BASE_HOURS = [10, 10, 10, 10, 8, 0, 0];
+  const days = [];
+  for (let i = 0; i < 7; i++) {
+    const date    = new Date(monday); date.setDate(monday.getDate() + i);
+    const dateStr = date.toISOString().split('T')[0];
+    const dayRecs = weekRecords.filter(r => r.timestamp.startsWith(dateStr));
+    const entrada = dayRecs.find(r => r.type === 'entrada');
+    const salida  = dayRecs.find(r => r.type === 'salida');
+    let totalHours = 0, baseHours = 0, extraHours = 0;
+    let entradaTime = '', salidaTime = '';
+    if (entrada) entradaTime = new Date(entrada.timestamp).toLocaleTimeString('es-MX',{hour:'2-digit',minute:'2-digit'});
+    if (salida)  salidaTime  = new Date(salida.timestamp).toLocaleTimeString('es-MX',{hour:'2-digit',minute:'2-digit'});
+    if (entrada && salida) {
+      totalHours = Math.round(((new Date(salida.timestamp) - new Date(entrada.timestamp)) / 3600000) * 100) / 100;
+      baseHours  = i >= 5 ? 0 : Math.min(totalHours, BASE_HOURS[i]);
+      extraHours = i >= 5 ? totalHours : Math.max(0, totalHours - BASE_HOURS[i]);
+    }
+    days.push({ dayName: DAY_NAMES[i], date, dateStr, entradaTime, salidaTime, totalHours, baseHours, extraHours, isWeekend: i >= 5, hasRecord: !!(entrada || salida) });
+  }
+  return days;
+}
+
+function jobSummaryHtml(dateStr, allRecords) {
+  // Find the salida record for this day and extract jobHours
+  const salida = (allRecords || []).find(r => r.type === 'salida' && r.timestamp.startsWith(dateStr));
+  if (!salida || !salida.jobHours || !salida.jobHours.length) return '';
+  const tags = salida.jobHours.map(jh => `<span>${jh.job}: ${jh.hours}h</span>`).join('');
+  return `<div class="day-jobs-summary">${tags}</div>`;
+}
+
+function renderDayRows(days, allRecords) {
+  const fmtH = h => h > 0 ? `${h} h` : '—';
+  return days.map(d => `
+    <tr class="${d.isWeekend?'day-weekend':''} ${!d.hasRecord&&!d.isWeekend?'day-norecord':''}">
+      <td>
+        <strong>${d.dayName}</strong>
+        ${jobSummaryHtml(d.dateStr, allRecords)}
+      </td>
+      <td>${d.date.toLocaleDateString('es-MX',{day:'2-digit',month:'2-digit',year:'numeric'})}</td>
+      <td>${d.entradaTime||'—'}</td><td>${d.salidaTime||'—'}</td>
+      <td>${fmtH(d.totalHours)}</td>
+      <td>${fmtH(d.baseHours)}</td>
+      <td style="color:${d.extraHours>0?'var(--red)':'inherit'};font-weight:${d.extraHours>0?'700':'400'};">${fmtH(d.extraHours)}</td>
+    </tr>`).join('');
+}
+
+function sumDays(days) {
+  return {
+    totalAll:   Math.round(days.reduce((s,d)=>s+d.totalHours,0)*100)/100,
+    totalBase:  Math.round(days.reduce((s,d)=>s+d.baseHours, 0)*100)/100,
+    totalExtra: Math.round(days.reduce((s,d)=>s+d.extraHours,0)*100)/100
+  };
+}
+
+function infoGrid(items) {
+  return `<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(130px,1fr));gap:12px;">${
+    items.map(([lbl,val,color])=>`<div>
+      <div style="font-size:11px;color:var(--ink-soft);font-weight:700;text-transform:uppercase;letter-spacing:.5px;">${lbl}</div>
+      <div style="font-weight:700;font-size:15px;${color?'color:'+color:''}">${val}</div>
+    </div>`).join('')
+  }</div>`;
+}
+
+// ══════════════════════════════════════════════════════════════
+// WEEKLY REPORT — generate
+// ══════════════════════════════════════════════════════════════
+let weeklyReportData  = null;
+let weeklyMode        = 'individual';
+
+async function generateWeeklyReport() {
+  weeklyMode = document.getElementById('modeIndividual').classList.contains('active') ? 'individual' : 'area';
+  const week = parseInt(document.getElementById('weeklyWeek').value);
+  const year = parseInt(document.getElementById('weeklyYear').value);
+  if (!week || week < 1 || week > 53) return toast('Ingresa una semana válida (1-53)', 'error');
+  if (!year || year < 2024) return toast('Ingresa un año válido', 'error');
+
+  const monday = getMondayOfWeek(week, year);
+  const sunday = new Date(monday); sunday.setDate(monday.getDate() + 6);
+  const fromStr = monday.toISOString().split('T')[0];
+  const toStr   = sunday.toISOString().split('T')[0];
+
+  // Reset signatures
+  resetSignatureBoxes();
+  loadSigners();
+
+  if (weeklyMode === 'individual') {
+    const workerId = document.getElementById('weeklyWorker').value;
+    if (!workerId) return toast('Selecciona un trabajador', 'error');
+    const worker = workers.find(w => w.id === workerId);
+    if (!worker) return toast('Trabajador no encontrado', 'error');
+
+    const r   = await fetch(`/api/records?workerId=${workerId}&from=${fromStr}&to=${toStr}T23:59:59`);
+    const recs = await r.json();
+    const days = buildWorkerDays(recs, monday);
+    const { totalAll, totalBase, totalExtra } = sumDays(days);
+
+    weeklyReportData = { mode:'individual', worker, week, year, monday, sunday, days, recs, totalAll, totalBase, totalExtra };
+
+    document.getElementById('weeklyReportTitle').textContent = `Reporte Semana ${week} — ${worker.name}`;
+    document.getElementById('weeklyReportRange').textContent = `${monday.toLocaleDateString('es-MX',{day:'2-digit',month:'long'})} – ${sunday.toLocaleDateString('es-MX',{day:'2-digit',month:'long',year:'numeric'})}`;
+    document.getElementById('weeklyWorkerInfo').innerHTML = infoGrid([
+      ['Trabajador', worker.name], ['Puesto', worker.position||'—'], ['Área', worker.area||'—'],
+      ['Semana', `${week} / ${year}`],
+      ['Hrs Normales', `${totalBase} h`, 'var(--green)'],
+      ['Hrs Extras',   `${totalExtra} h`, 'var(--red)'],
+      ['Total',        `${totalAll} h`]
+    ]);
+
+    document.getElementById('weeklyBody').innerHTML = renderDayRows(days, recs);
+    document.getElementById('weeklyFoot').innerHTML = `<tr>
+      <td colspan="4" style="text-align:right;font-weight:700;">TOTALES</td>
+      <td style="font-weight:700;">${totalAll} h</td>
+      <td style="font-weight:700;color:var(--green);">${totalBase} h</td>
+      <td style="font-weight:700;color:var(--red);">${totalExtra} h</td></tr>`;
+
+    document.getElementById('weeklyTableWrap').style.display = '';
+    document.getElementById('weeklyAreaWrap').style.display  = 'none';
+
+  } else {
+    // Area mode
+    const area = document.getElementById('weeklyArea').value;
+    if (!area) return toast('Selecciona un área', 'error');
+    const areaWorkers = workers.filter(w => w.area === area);
+    if (!areaWorkers.length) return toast(`Sin trabajadores en el área "${area}"`, 'error');
+
+    // Fetch all records for the week, filter by area workers
+    const allRecs = await Promise.all(
+      areaWorkers.map(w => fetch(`/api/records?workerId=${w.id}&from=${fromStr}&to=${toStr}T23:59:59`).then(r=>r.json()))
+    );
+
+    const workerData = areaWorkers.map((w, i) => {
+      const days = buildWorkerDays(allRecs[i], monday);
+      return { worker: w, days, recs: allRecs[i], ...sumDays(days) };
+    });
+
+    const grandBase  = Math.round(workerData.reduce((s,d)=>s+d.totalBase, 0)*100)/100;
+    const grandExtra = Math.round(workerData.reduce((s,d)=>s+d.totalExtra,0)*100)/100;
+    const grandAll   = Math.round(workerData.reduce((s,d)=>s+d.totalAll,  0)*100)/100;
+
+    weeklyReportData = { mode:'area', area, week, year, monday, sunday, workerData, grandBase, grandExtra, grandAll };
+
+    document.getElementById('weeklyReportTitle').textContent = `Reporte Semana ${week} — Área: ${area}`;
+    document.getElementById('weeklyReportRange').textContent = `${monday.toLocaleDateString('es-MX',{day:'2-digit',month:'long'})} – ${sunday.toLocaleDateString('es-MX',{day:'2-digit',month:'long',year:'numeric'})}`;
+    document.getElementById('weeklyWorkerInfo').innerHTML = infoGrid([
+      ['Área', area], ['Semana', `${week} / ${year}`], ['Trabajadores', areaWorkers.length],
+      ['Hrs Normales', `${grandBase} h`, 'var(--green)'],
+      ['Hrs Extras',   `${grandExtra} h`, 'var(--red)'],
+      ['Total',        `${grandAll} h`]
+    ]);
+
+    document.getElementById('weeklyTableWrap').style.display = 'none';
+    document.getElementById('weeklyAreaWrap').style.display  = '';
+    document.getElementById('weeklyAreaWrap').innerHTML = workerData.map(wd => `
+      <div class="area-worker-table">
+        <div class="area-worker-name">👤 ${wd.worker.name} <span style="font-weight:400;color:var(--ink-soft);font-size:12px;">— ${wd.worker.position||''}</span>
+          <span style="float:right;font-size:12px;color:var(--ink-soft);">Normal: <strong style="color:var(--green)">${wd.totalBase}h</strong> &nbsp; Extra: <strong style="color:var(--red)">${wd.totalExtra}h</strong></span>
+        </div>
+        <div class="table-wrap"><table>
+          <thead><tr style="background:var(--ink);">
+            <th style="color:#fff;">Día</th><th style="color:#fff;">Fecha</th>
+            <th style="color:#fff;">Entrada</th><th style="color:#fff;">Salida</th>
+            <th style="color:#fff;">Total</th><th style="color:#fff;">Normal</th><th style="color:#fff;">Extra</th>
+          </tr></thead>
+          <tbody>${renderDayRows(wd.days, wd.recs)}</tbody>
+          <tfoot><tr>
+            <td colspan="4" style="text-align:right;font-weight:700;">SUBTOTAL</td>
+            <td style="font-weight:700;">${wd.totalAll} h</td>
+            <td style="font-weight:700;color:var(--green);">${wd.totalBase} h</td>
+            <td style="font-weight:700;color:var(--red);">${wd.totalExtra} h</td>
+          </tr></tfoot>
+        </table></div>
+      </div>`).join('');
+  }
+
+  document.getElementById('weeklyReportPreview').style.display = '';
+  toast('Reporte generado ✓', 'success');
+}
+
+// ══════════════════════════════════════════════════════════════
+// WEEKLY REPORT — download
+// ══════════════════════════════════════════════════════════════
+function downloadWeeklyReport() {
+  if (!weeklyReportData) return;
+  const { week, year } = weeklyReportData;
+  const wb = XLSX.utils.book_new();
+  const HEADER = ['NOMBRE','PUESTO','ÁREA','DIA','FECHA','SEMANA','HORA DE ENTRADA','HORA DE SALIDA','HORAS TOTALES','JORNADA NORMAL','HORAS EXTRAS'];
+  const timeFmt = 'HH:MM', dateFmt = 'DD/MM/YYYY', hoursFmt = '[h]:MM';
+
+  const addSheet = (sheetName, fname_prefix, worker, days, totBase, totExtra, totAll) => {
+    const rows = [HEADER];
+    days.forEach(d => {
+      rows.push([
+        worker.name, worker.position||'', worker.area||'', d.dayName,
+        dateToExcelSerial(d.date), week,
+        d.entradaTime ? timeStrToExcelFraction(d.entradaTime) : null,
+        d.salidaTime  ? timeStrToExcelFraction(d.salidaTime)  : null,
+        d.totalHours > 0 ? d.totalHours/24 : 0,
+        d.baseHours  > 0 ? d.baseHours/24  : 0,
+        d.extraHours > 0 ? d.extraHours/24 : 0
+      ]);
+    });
+    rows.push(['','','','','','','','', totAll/24, totBase/24, totExtra/24]);
+    const ws = XLSX.utils.aoa_to_sheet(rows);
+    ws['!cols'] = [{wch:22},{wch:16},{wch:14},{wch:12},{wch:12},{wch:8},{wch:15},{wch:15},{wch:13},{wch:13},{wch:11}];
+    for (let r = 1; r < rows.length; r++) {
+      [[4,'DD/MM/YYYY'],[6,'HH:MM'],[7,'HH:MM'],[8,'[h]:MM'],[9,'[h]:MM'],[10,'[h]:MM']].forEach(([c,fmt])=>{
+        const cell = XLSX.utils.encode_cell({r,c}); if (ws[cell]) ws[cell].z = fmt;
+      });
+    }
+    XLSX.utils.book_append_sheet(wb, ws, sheetName.slice(0,31));
+  };
+
+  if (weeklyReportData.mode === 'individual') {
+    const { worker, days, totalBase, totalExtra, totalAll } = weeklyReportData;
+    addSheet(`S${week}`, worker.name, worker, days, totalBase, totalExtra, totalAll);
+    XLSX.writeFile(wb, `Reporte_${worker.name.replace(/\s+/g,'_')}_S${week}_${year}.xlsx`);
+  } else {
+    const { area, workerData } = weeklyReportData;
+    workerData.forEach(wd => addSheet(wd.worker.name.slice(0,31), wd.worker.name, wd.worker, wd.days, wd.totalBase, wd.totalExtra, wd.totalAll));
+    XLSX.writeFile(wb, `Reporte_${area.replace(/\s+/g,'_')}_S${week}_${year}.xlsx`);
+  }
+}
+
+// ══════════════════════════════════════════════════════════════
+// SIGNERS & SIGNATURES
+// ══════════════════════════════════════════════════════════════
+let signersConfig = { gerencia: null, rrhh: null }; // { id, name, username }
+let reportSignatures = { gerencia: null, rrhh: null }; // { name, timestamp }
+
+function loadSigners() {
+  try {
+    const saved = localStorage.getItem('persico_signers');
+    if (saved) signersConfig = JSON.parse(saved);
+  } catch(e) {}
+  populateSignerSelects();
+  updateSignerBoxNames();
+}
+
+function saveSigners() {
+  const gId = document.getElementById('signerGerencia')?.value;
+  const rId = document.getElementById('signerRRHH')?.value;
+  const gUser = systemUsers.find(u => u.id === gId) || null;
+  const rUser = systemUsers.find(u => u.id === rId) || null;
+  signersConfig = {
+    gerencia: gUser ? { id: gUser.id, name: gUser.name, username: gUser.username } : null,
+    rrhh:     rUser ? { id: rUser.id, name: rUser.name, username: rUser.username } : null
+  };
+  try { localStorage.setItem('persico_signers', JSON.stringify(signersConfig)); } catch(e) {}
+  const st = document.getElementById('signersStatus');
+  if (st) { st.style.display = 'block'; setTimeout(() => st.style.display = 'none', 2500); }
+  updateSignerBoxNames();
+}
+
+function populateSignerSelects() {
+  ['signerGerencia','signerRRHH'].forEach((selId, i) => {
+    const sel = document.getElementById(selId);
+    if (!sel) return;
+    const cur = i === 0 ? signersConfig.gerencia?.id : signersConfig.rrhh?.id;
+    sel.innerHTML = '<option value="">— Sin asignar —</option>';
+    systemUsers.forEach(u => {
+      const o = document.createElement('option');
+      o.value = u.id; o.textContent = `${u.name} (${u.username})`;
+      if (u.id === cur) o.selected = true;
+      sel.appendChild(o);
+    });
+  });
+}
+
+function updateSignerBoxNames() {
+  const gEl = document.getElementById('sigGerenciaName');
+  const rEl = document.getElementById('sigRRHHName');
+  if (gEl) gEl.textContent = signersConfig.gerencia?.name || '—';
+  if (rEl) rEl.textContent = signersConfig.rrhh?.name     || '—';
+}
+
+function resetSignatureBoxes() {
+  reportSignatures = { gerencia: null, rrhh: null };
+  ['Gerencia','RRHH'].forEach(type => {
+    const box = document.getElementById(`sig${type}`);
+    const st  = document.getElementById(`sig${type}Status`);
+    const line = box?.querySelector('.sig-line');
+    if (box) box.classList.remove('signed-box');
+    if (st)  { st.className = 'sig-status unsigned'; st.textContent = 'Sin firmar'; }
+    if (line) line.style.display = 'none';
+    const btn = box?.querySelector('button');
+    if (btn) { btn.style.display = ''; btn.textContent = '✍️ Firmar'; }
+  });
+}
+
+function requestSignature(type) {
+  const signer = type === 'gerencia' ? signersConfig.gerencia : signersConfig.rrhh;
+  if (!signer) return toast('No hay firmante configurado para este rol. Configúralo en la pestaña Usuarios.', 'error');
+  document.getElementById('sigModalTitle').textContent  = type === 'gerencia' ? '✍️ Autorización de Gerencia' : '✍️ Autorización de RRHH';
+  document.getElementById('sigModalDesc').textContent   = `Ingresa la contraseña de "${signer.name}" para autorizar el reporte.`;
+  document.getElementById('sigType').value              = type;
+  document.getElementById('sigPassword').value          = '';
+
+  // Populate only the authorized signer
+  const sel = document.getElementById('sigUserSelect');
+  sel.innerHTML = `<option value="${signer.id}" selected>${signer.name} (${signer.username})</option>`;
+
+  document.getElementById('signatureModal').classList.add('open');
+  setTimeout(() => document.getElementById('sigPassword').focus(), 300);
+}
+
+async function confirmSignature() {
+  const rawType  = document.getElementById('sigType').value;
+  const password = document.getElementById('sigPassword').value;
+  if (!password) return toast('Ingresa la contraseña', 'error');
+
+  // Determine actual type and whether this is a ctrl (persistent) or weekly (in-memory) sig
+  const isCtrl   = rawType.startsWith('ctrl-');
+  const sigType  = isCtrl ? rawType.replace('ctrl-', '') : rawType;
+  const signer   = sigType === 'gerencia' ? signersConfig.gerencia : signersConfig.rrhh;
+  if (!signer) return toast('Sin firmante configurado', 'error');
+
+  if (isCtrl) {
+    // Persistent signature via server
+    const r = await fetch('/api/signatures', {
+      method: 'POST', headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({ reportKey: ctrlReportKey, type: sigType, signerName: signer.name, signerUsername: signer.username, password })
+    });
+    const data = await r.json();
+    if (!r.ok) return toast(data.error || 'Error al firmar', 'error');
+    ctrlSigState[sigType] = data.signature;
+    closeModal('signatureModal');
+    ctrlUpdateSigBoxes();
+    loadControlReport(); // refresh to update auth badges in table
+    toast(`Reporte autorizado por ${signer.name} ✓`, 'success');
+  } else {
+    // In-memory signature for weekly report
+    const r = await fetch('/api/login', {
+      method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({ username: signer.username, password })
+    });
+    if (!r.ok) return toast('Contraseña incorrecta', 'error');
+
+    const now     = new Date();
+    const typeKey = sigType === 'gerencia' ? 'Gerencia' : 'RRHH';
+    reportSignatures[sigType] = { name: signer.name, timestamp: now.toLocaleString('es-MX') };
+    closeModal('signatureModal');
+    const box = document.getElementById(`sig${typeKey}`);
+    const st  = document.getElementById(`sig${typeKey}Status`);
+    if (box) box.classList.add('signed-box');
+    if (st)  { st.className = 'sig-status signed'; st.textContent = `✅ Firmado — ${now.toLocaleTimeString('es-MX')}`; }
+    const btn = box?.querySelector('button');
+    if (btn) btn.style.display = 'none';
+    let line = box?.querySelector('.sig-line');
+    if (!line) { line = document.createElement('div'); line.className = 'sig-line'; box.insertBefore(line, st); }
+    line.style.display = 'block';
+    toast(`Reporte autorizado por ${signer.name} ✓`, 'success');
+  }
+}
+// ══════════════════════════════════════════════════════════════
+// JOBS REPORT TAB
+// ══════════════════════════════════════════════════════════════
+let jobsReportData = null;
+
+async function loadJobsReport() {
+  const workerId = document.getElementById('jobsFilterWorker').value;
+  const week     = parseInt(document.getElementById('jobsFilterWeek').value);
+  const year     = parseInt(document.getElementById('jobsFilterYear').value);
+
+  if (!workerId) return toast('Selecciona un trabajador', 'error');
+  if (!week || week < 1 || week > 53) return toast('Semana inválida', 'error');
+  if (!year || year < 2024) return toast('Año inválido', 'error');
+
+  const worker  = workers.find(w => w.id === workerId);
+  if (!worker) return;
+
+  const monday  = getMondayOfWeek(week, year);
+  const sunday  = new Date(monday); sunday.setDate(monday.getDate() + 6);
+  const fromStr = monday.toISOString().split('T')[0];
+  const toStr   = sunday.toISOString().split('T')[0];
+
+  const r    = await fetch(`/api/records?workerId=${workerId}&from=${fromStr}&to=${toStr}T23:59:59`);
+  const recs = await r.json();
+
+  // Collect all unique jobs across the week
+  const allJobs = new Set(['ADMIN', ...(worker.allowedJobs || [])]);
+  recs.forEach(rec => (rec.jobHours || []).forEach(jh => allJobs.add(jh.job)));
+  const jobs = [...allJobs];
+
+  const DAY_NAMES = ['LUNES','MARTES','MIÉRCOLES','JUEVES','VIERNES','SÁBADO','DOMINGO'];
+  const days = [];
+  for (let i = 0; i < 7; i++) {
+    const date    = new Date(monday); date.setDate(monday.getDate() + i);
+    const dateStr = date.toISOString().split('T')[0];
+    const salida  = recs.find(rec => rec.type === 'salida' && rec.timestamp.startsWith(dateStr));
+    const jobMap  = {};
+    (salida?.jobHours || []).forEach(jh => { jobMap[jh.job] = jh.hours; });
+    days.push({ dayName: DAY_NAMES[i], date, dateStr, totalHours: salida?.totalHours || 0, jobMap, isWeekend: i >= 5, salidaId: salida?.id || null });
+  }
+
+  jobsReportData = { worker, week, year, monday, sunday, days, jobs };
+
+  // Build dynamic table headers
+  const extraCols = jobs.map(j => `<th style="color:#fff;">${j}</th>`).join('');
+  document.getElementById('jobsTableJobsHeader').outerHTML = extraCols;
+
+  document.getElementById('jobsReportTitle').textContent = `${worker.name} — Semana ${week} / ${year}`;
+
+  // Totals per job
+  const jobTotals = {};
+  jobs.forEach(j => { jobTotals[j] = 0; });
+
+  document.getElementById('jobsTableBody').innerHTML = days.map((d, di) => {
+    const jobCells = jobs.map(j => {
+      const h = d.jobMap[j] || 0;
+      jobTotals[j] = Math.round((jobTotals[j] + h) * 100) / 100;
+      return `<td style="${h > 0 ? 'font-weight:600;' : 'color:var(--ink-soft);'}">${h > 0 ? h + ' h' : '—'}</td>`;
+    }).join('');
+    const actionCell = d.salidaId
+      ? `<td><button class="btn btn-secondary btn-sm" onclick="adminOpenJobHoursModal(${di})">✏️ Editar</button></td>`
+      : `<td style="color:var(--ink-soft);font-size:12px;">Sin salida</td>`;
+    return `<tr class="${d.isWeekend ? 'day-weekend' : ''}">
+      <td><strong>${d.dayName}</strong></td>
+      <td>${d.date.toLocaleDateString('es-MX',{day:'2-digit',month:'2-digit',year:'numeric'})}</td>
+      <td>${d.totalHours > 0 ? d.totalHours + ' h' : '—'}</td>
+      ${jobCells}
+      ${actionCell}
+    </tr>`;
+  }).join('');
+
+  const totalJobCells = jobs.map(j => `<td style="font-weight:700;color:var(--red);">${jobTotals[j] > 0 ? jobTotals[j] + ' h' : '—'}</td>`).join('');
+  const grandTotal    = Math.round(days.reduce((s,d) => s + d.totalHours, 0) * 100) / 100;
+  document.getElementById('jobsTableFoot').innerHTML = `<tr>
+    <td colspan="2" style="text-align:right;font-weight:700;">TOTAL SEMANA</td>
+    <td style="font-weight:700;">${grandTotal} h</td>
+    ${totalJobCells}
+    <td></td>
+  </tr>`;
+
+  document.getElementById('jobsReportWrap').style.display = '';
+  toast('Reporte de jobs generado ✓', 'success');
+}
+
+function downloadJobsReport() {
+  if (!jobsReportData) return;
+  const { worker, week, year, days, jobs } = jobsReportData;
+  const wb = XLSX.utils.book_new();
+  const header = ['DIA', 'FECHA', 'HRS TOTAL', ...jobs];
+  const rows   = [header];
+  const totals = { total: 0 }; jobs.forEach(j => totals[j] = 0);
+
+  days.forEach(d => {
+    const jobVals = jobs.map(j => d.jobMap[j] || 0);
+    jobVals.forEach((h, i) => { totals[jobs[i]] = Math.round((totals[jobs[i]] + h) * 100) / 100; });
+    totals.total = Math.round((totals.total + d.totalHours) * 100) / 100;
+    rows.push([d.dayName, d.date.toLocaleDateString('es-MX'), d.totalHours > 0 ? d.totalHours : '', ...jobVals.map(h => h > 0 ? h : '')]);
+  });
+  rows.push(['', 'TOTAL', totals.total, ...jobs.map(j => totals[j] > 0 ? totals[j] : '')]);
+
+  const ws = XLSX.utils.aoa_to_sheet(rows);
+  ws['!cols'] = [{wch:12},{wch:14},{wch:12},...jobs.map(()=>({wch:14}))];
+  XLSX.utils.book_append_sheet(wb, ws, `Jobs S${week}`);
+  XLSX.writeFile(wb, `Jobs_${worker.name.replace(/\s+/g,'_')}_S${week}_${year}.xlsx`);
+}
+
+// ══════════════════════════════════════════════════════════════
+// CONTROL DE HORAS REPORT
+// ══════════════════════════════════════════════════════════════
+let ctrlMode       = 'week';
+let ctrlReportRows = [];
+let ctrlReportKey  = '';        // unique key for this report's signatures
+let ctrlSigState   = { gerencia: null, rrhh: null }; // loaded from server
+
+function initControlTab() {
+  // Populate worker select
+  const sel = document.getElementById('ctrlWorker');
+  if (sel) {
+    const cur = sel.value;
+    sel.innerHTML = '<option value="">Todos los trabajadores</option>';
+    workers.forEach(w => {
+      const o = document.createElement('option');
+      o.value = w.id; o.textContent = w.name;
+      if (w.id === cur) o.selected = true;
+      sel.appendChild(o);
+    });
+  }
+  // Default year fields to current year
+  const now = new Date();
+  ['ctrlWeekYear','ctrlMonthYear','ctrlYearVal','ctrlJobYear'].forEach(id => {
+    const el = document.getElementById(id);
+    if (el && !el.value) el.value = now.getFullYear();
+  });
+  // Default month to current
+  const mSel = document.getElementById('ctrlMonth');
+  if (mSel && !mSel.value) mSel.value = now.getMonth() + 1;
+  // Default week range
+  const wf = document.getElementById('ctrlWeekFrom');
+  const wt = document.getElementById('ctrlWeekTo');
+  const curWeek = getISOWeek(now);
+  if (wf && !wf.value) wf.value = curWeek;
+  if (wt && !wt.value) wt.value = curWeek;
+}
+
+function setCtrlMode(mode) {
+  ctrlMode = mode;
+  ['week','month','year','job'].forEach(m => {
+    document.getElementById(`ctrlMode${m.charAt(0).toUpperCase()+m.slice(1)}`).classList.toggle('active', m === mode);
+    const fields = document.getElementById(`ctrl${m.charAt(0).toUpperCase()+m.slice(1)}Fields`);
+    if (fields) fields.style.display = m === mode ? (m === 'week' ? 'contents' : 'block') : 'none';
+  });
+  document.getElementById('ctrlReportWrap').style.display = 'none';
+}
+
+// Build date range from filter mode
+function ctrlDateRange() {
+  const now = new Date();
+  let from, to, label;
+
+  if (ctrlMode === 'week') {
+    const wf   = parseInt(document.getElementById('ctrlWeekFrom').value);
+    const wt   = parseInt(document.getElementById('ctrlWeekTo').value);
+    const year = parseInt(document.getElementById('ctrlWeekYear').value) || now.getFullYear();
+    if (!wf || !wt) return null;
+    const monFrom = getMondayOfWeek(Math.min(wf,wt), year);
+    const sunTo   = new Date(getMondayOfWeek(Math.max(wf,wt), year)); sunTo.setDate(sunTo.getDate() + 6);
+    from  = monFrom.toISOString().split('T')[0];
+    to    = sunTo.toISOString().split('T')[0];
+    label = wf === wt ? `Semana ${wf} / ${year}` : `Semanas ${Math.min(wf,wt)}–${Math.max(wf,wt)} / ${year}`;
+
+  } else if (ctrlMode === 'month') {
+    const month = parseInt(document.getElementById('ctrlMonth').value);
+    const year  = parseInt(document.getElementById('ctrlMonthYear').value) || now.getFullYear();
+    from  = `${year}-${String(month).padStart(2,'0')}-01`;
+    const lastDay = new Date(year, month, 0).getDate();
+    to    = `${year}-${String(month).padStart(2,'0')}-${lastDay}`;
+    const mNames = ['','Enero','Febrero','Marzo','Abril','Mayo','Junio','Julio','Agosto','Septiembre','Octubre','Noviembre','Diciembre'];
+    label = `${mNames[month]} ${year}`;
+
+  } else if (ctrlMode === 'year') {
+    const year = parseInt(document.getElementById('ctrlYearVal').value) || now.getFullYear();
+    from  = `${year}-01-01`;
+    to    = `${year}-12-31`;
+    label = `Año ${year}`;
+
+  } else { // job mode
+    const year = parseInt(document.getElementById('ctrlJobYear').value) || now.getFullYear();
+    from  = `${year}-01-01`;
+    to    = `${year}-12-31`;
+    label = `Año ${year}`;
+  }
+  return { from, to, label };
+}
+
+async function loadControlReport() {
+  const range = ctrlDateRange();
+  if (!range) return toast('Completa los filtros de fecha', 'error');
+
+  const workerId  = document.getElementById('ctrlWorker').value;
+  const jobFilter = ctrlMode === 'job' ? (document.getElementById('ctrlJobVal').value.trim().toUpperCase()) : '';
+  if (ctrlMode === 'job' && !jobFilter) return toast('Ingresa un número de job', 'error');
+
+  // Build stable report key for signature persistence
+  const workerSuffix = workerId ? `-${workerId.slice(0,8)}` : '';
+  const jobSuffix    = jobFilter ? `-${jobFilter}` : '';
+  ctrlReportKey = `ctrl:${range.label.replace(/[\s\/]/g,'_')}${workerSuffix}${jobSuffix}`;
+
+  // Fetch records and signatures in parallel
+  let url = `/api/records?from=${range.from}&to=${range.to}T23:59:59`;
+  if (workerId) url += `&workerId=${workerId}`;
+  const [recsRes, sigsRes] = await Promise.all([
+    fetch(url),
+    fetch(`/api/signatures?reportKey=${encodeURIComponent(ctrlReportKey)}`)
+  ]);
+  const recs = await recsRes.json();
+  const sigs = await sigsRes.json();
+
+  ctrlSigState.gerencia = sigs.find(s => s.type === 'gerencia') || null;
+  ctrlSigState.rrhh     = sigs.find(s => s.type === 'rrhh')     || null;
+
+  const workerMap = {};
+  workers.forEach(w => { workerMap[w.id] = w; });
+
+  const isAuthorized = !!(ctrlSigState.gerencia && ctrlSigState.rrhh);
+  const authBadge = isAuthorized
+    ? `<span class="badge badge-green">✅ Autorizado</span>`
+    : ctrlSigState.gerencia
+      ? `<span class="badge badge-amber">⚠️ Parcial</span>`
+      : `<span class="badge" style="background:var(--danger-bg);color:#DC2626;">✗ Sin autorizar</span>`;
+
+  const rows = [];
+  const salidaRecs = recs.filter(r => r.type === 'salida' && r.jobHours && r.jobHours.length > 0);
+  salidaRecs.forEach(rec => {
+    const w       = workerMap[rec.workerId] || {};
+    const dt      = new Date(rec.timestamp);
+    const dateSerial = dateToExcelSerial(dt);
+    const dateStr    = dt.toLocaleDateString('es-MX', {day:'2-digit', month:'2-digit', year:'numeric'});
+    rec.jobHours.forEach(jh => {
+      if (jobFilter && jh.job.toUpperCase() !== jobFilter) return;
+      rows.push({ name: w.name || rec.workerName || '', date: dt, dateStr, dateSerial, job: jh.job, hours: jh.hours, area: w.area || '', workerId: rec.workerId });
+    });
+  });
+  rows.sort((a,b) => a.date - b.date || a.name.localeCompare(b.name));
+  ctrlReportRows = rows;
+
+  const workerLabel = workerId ? (workerMap[workerId]?.name || '') : 'Todos';
+  const jobLabel    = jobFilter ? ` · Job: ${jobFilter}` : '';
+  document.getElementById('ctrlReportTitle').textContent = `Control de Horas — ${range.label}`;
+  document.getElementById('ctrlReportMeta').innerHTML    = `Trabajador: ${workerLabel}${jobLabel} · ${rows.length} registros &nbsp;${authBadge}`;
+
+  const totalHours  = Math.round(rows.reduce((s,r) => s+r.hours, 0)*100)/100;
+  const uniqueJobs  = new Set(rows.map(r=>r.job)).size;
+  const uniqueNames = new Set(rows.map(r=>r.name)).size;
+  document.getElementById('ctrlStats').innerHTML = `
+    <div class="stat-card"><div class="stat-val">${totalHours}</div><div class="stat-lbl">Horas totales</div></div>
+    <div class="stat-card"><div class="stat-val">${uniqueJobs}</div><div class="stat-lbl">Jobs distintos</div></div>
+    <div class="stat-card"><div class="stat-val">${uniqueNames}</div><div class="stat-lbl">Trabajadores</div></div>`;
+
+  const emptyMsg  = `<tr><td colspan="6" style="text-align:center;color:var(--ink-soft);padding:32px;">Sin registros con distribución de jobs en el período</td></tr>`;
+  const emptyCard = `<p style="color:var(--ink-soft);font-size:13px;text-align:center;padding:24px;">Sin registros con distribución de jobs en el período</p>`;
+
+  const rowAuthBadge = isAuthorized
+    ? `<span class="badge badge-green" style="font-size:10px;">✅ Sí</span>`
+    : ctrlSigState.gerencia
+      ? `<span class="badge badge-amber" style="font-size:10px;">⚠️ Parcial</span>`
+      : `<span style="color:var(--ink-soft);font-size:12px;">—</span>`;
+
+  const tbody = document.getElementById('ctrlTableBody');
+  if (tbody) {
+    tbody.innerHTML = rows.length === 0 ? emptyMsg : rows.map(row => `
+      <tr>
+        <td><strong>${row.name}</strong></td>
+        <td style="white-space:nowrap;">${row.dateStr}</td>
+        <td><span class="badge badge-amber" style="font-size:11px;">${row.job}</span></td>
+        <td style="font-weight:600;">${row.hours} h</td>
+        <td><span class="badge badge-green" style="font-size:10px;">${row.area || '—'}</span></td>
+        <td>${rowAuthBadge}</td>
+      </tr>`).join('');
+  }
+
+  const tfoot = document.getElementById('ctrlTableFoot');
+  if (tfoot && rows.length > 0) {
+    const jobTotals = {};
+    rows.forEach(r => { jobTotals[r.job] = Math.round(((jobTotals[r.job]||0) + r.hours)*100)/100; });
+    const jobSummary = Object.entries(jobTotals).sort((a,b)=>b[1]-a[1])
+      .map(([job,h]) => `<span class="badge badge-amber" style="margin:2px;font-size:11px;">${job}: ${h}h</span>`).join('');
+    tfoot.innerHTML = `
+      <tr>
+        <td colspan="3" style="font-weight:700;text-align:right;">TOTAL</td>
+        <td style="font-weight:800;font-size:15px;">${totalHours} h</td>
+        <td colspan="2"></td>
+      </tr>
+      <tr><td colspan="6" style="padding:8px 14px;">${jobSummary}</td></tr>`;
+  }
+
+  const cards = document.getElementById('ctrlCards');
+  if (cards) {
+    cards.innerHTML = rows.length === 0 ? emptyCard : rows.map(row => `
+      <div class="card-row">
+        <div style="display:flex;justify-content:space-between;align-items:center;">
+          <div class="card-row-title">${row.name}</div>
+          <span class="badge badge-amber">${row.job}</span>
+        </div>
+        <div class="card-row-meta">
+          <span>📅 ${row.dateStr}</span><br>
+          <span>⏱ <strong>${row.hours} h</strong></span>
+          ${row.area ? `<span style="margin-left:8px;">🏭 ${row.area}</span>` : ''}<br>
+          <span>Autorizado: ${rowAuthBadge}</span>
+        </div>
+      </div>`).join('');
+  }
+
+  ctrlUpdateSigBoxes();
+  document.getElementById('ctrlReportWrap').style.display = '';
+  toast(`${rows.length} registros cargados ✓`, 'success');
+}
+
+function downloadControlReport() {
+  if (!ctrlReportRows.length) return;
+  const wb   = XLSX.utils.book_new();
+  const isAuthorized = !!(ctrlSigState.gerencia && ctrlSigState.rrhh);
+  const authStatus = isAuthorized ? 'Autorizado' : ctrlSigState.gerencia ? 'Parcial' : 'Sin autorizar';
+  const gerText = ctrlSigState.gerencia ? `${ctrlSigState.gerencia.signerName} (${new Date(ctrlSigState.gerencia.signedAt).toLocaleString('es-MX')})` : '';
+  const rrhhText = ctrlSigState.rrhh ? `${ctrlSigState.rrhh.signerName} (${new Date(ctrlSigState.rrhh.signedAt).toLocaleString('es-MX')})` : '';
+
+  const header = ['NAME','DATE','JOB','Hours','AREA','Autorizado','Firma Gerencia','Firma RRHH'];
+  const dataRows = ctrlReportRows.map(r => [
+    r.name, r.dateSerial, r.job, r.hours, r.area, authStatus, gerText, rrhhText
+  ]);
+  const ws = XLSX.utils.aoa_to_sheet([header, ...dataRows]);
+  for (let i = 1; i <= dataRows.length; i++) {
+    const cell = XLSX.utils.encode_cell({r:i, c:1});
+    if (ws[cell]) ws[cell].z = 'DD/MM/YYYY';
+  }
+  ws['!cols'] = [{wch:28},{wch:14},{wch:12},{wch:8},{wch:16},{wch:14},{wch:30},{wch:30}];
+  XLSX.utils.book_append_sheet(wb, ws, 'Control de Horas');
+  const range = ctrlDateRange();
+  XLSX.writeFile(wb, `Control_Horas_${(range?.label||'reporte').replace(/[\s\/]/g,'_')}.xlsx`);
+}
+
+// ── Control de Horas: signature box update
+function ctrlUpdateSigBoxes() {
+  loadSigners(); // ensure signersConfig is current
+  ['gerencia','rrhh'].forEach(type => {
+    const typeKey  = type === 'gerencia' ? 'Gerencia' : 'RRHH';
+    const sig      = ctrlSigState[type];
+    const box      = document.getElementById(`ctrlSig${typeKey}`);
+    const nameEl   = document.getElementById(`ctrlSig${typeKey}Name`);
+    const statusEl = document.getElementById(`ctrlSig${typeKey}Status`);
+    const btnFirm  = document.getElementById(`ctrlBtnFirmar${typeKey}`);
+    const btnRev   = document.getElementById(`ctrlBtnRevocar${typeKey}`);
+    if (!box) return;
+
+    if (sig) {
+      box.classList.add('signed-box');
+      if (nameEl)   nameEl.textContent   = sig.signerName;
+      if (statusEl) { statusEl.className = 'sig-status signed'; statusEl.textContent = `✅ ${new Date(sig.signedAt).toLocaleString('es-MX')}`; }
+      if (btnFirm)  btnFirm.style.display  = 'none';
+      if (btnRev)   btnRev.style.display   = '';
+    } else {
+      box.classList.remove('signed-box');
+      const signer = type === 'gerencia' ? signersConfig.gerencia : signersConfig.rrhh;
+      if (nameEl)   nameEl.textContent   = signer?.name || '—';
+      if (statusEl) { statusEl.className = 'sig-status unsigned'; statusEl.textContent = 'Sin firmar'; }
+      if (btnFirm)  btnFirm.style.display  = signer ? '' : 'none';
+      if (btnRev)   btnRev.style.display   = 'none';
+    }
+  });
+}
+
+// ── Control de Horas: request signature (reuses signatureModal)
+function ctrlRequestSignature(type) {
+  const signer = type === 'gerencia' ? signersConfig.gerencia : signersConfig.rrhh;
+  if (!signer) return toast('No hay firmante configurado. Configúralo en la pestaña Usuarios.', 'error');
+  if (!ctrlReportKey) return toast('Genera el reporte primero', 'error');
+
+  document.getElementById('sigModalTitle').textContent = type === 'gerencia' ? '✍️ Autorización de Gerencia' : '✍️ Autorización de RRHH';
+  document.getElementById('sigModalDesc').textContent  = `Ingresa la contraseña de "${signer.name}" para autorizar este reporte.`;
+  document.getElementById('sigType').value             = `ctrl-${type}`;  // prefix to distinguish
+  document.getElementById('sigPassword').value         = '';
+  const sel = document.getElementById('sigUserSelect');
+  sel.innerHTML = `<option value="${signer.id}" selected>${signer.name} (${signer.username})</option>`;
+  document.getElementById('signatureModal').classList.add('open');
+  setTimeout(() => document.getElementById('sigPassword').focus(), 300);
+}
+
+async function ctrlRevokeSignature(type) {
+  const sig = ctrlSigState[type];
+  if (!sig) return;
+  if (!confirm(`¿Revocar la firma de ${sig.signerName}?`)) return;
+  const r = await fetch(`/api/signatures/${sig.id}`, { method: 'DELETE' });
+  if (r.ok) {
+    ctrlSigState[type] = null;
+    ctrlUpdateSigBoxes();
+    // Refresh report to update auth badges
+    loadControlReport();
+    toast('Firma revocada', 'success');
+  }
+}
+
+// ══════════════════════════════════════════════════════════════
+function closeModal(id) { document.getElementById(id).classList.remove('open'); }
+
+function toast(msg, type='') {
+  const c = document.getElementById('toastContainer');
+  const t = document.createElement('div');
+  t.className = `toast ${type}`;
+  t.textContent = msg;
+  c.appendChild(t);
+  setTimeout(() => t.remove(), 4000);
+}
+
+// Enter key on login
+document.getElementById('loginPass').addEventListener('keydown', e => { if (e.key==='Enter') doLogin(); });
+document.getElementById('loginUser').addEventListener('keydown', e => { if (e.key==='Enter') document.getElementById('loginPass').focus(); });
+</script>
+</body>
+</html>
