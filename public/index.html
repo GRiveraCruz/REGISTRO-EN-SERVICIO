@@ -697,7 +697,7 @@
         <div class="card-title">📝 Solicitar Permiso</div>
         <div class="form-group">
           <label>Tipo de Permiso</label>
-          <select id="pmTipo">
+          <select id="pmTipo" onchange="pmKioskVacaciones()">
             <option value="Vacaciones">Vacaciones</option>
             <option value="Permiso por horas">Permiso por horas</option>
             <option value="Tiempo por Tiempo">Tiempo por Tiempo</option>
@@ -707,6 +707,7 @@
             <option value="Permiso de Paternidad">Permiso de Paternidad</option>
           </select>
         </div>
+        <div id="pmVacSaldo" style="display:none;margin:-4px 0 14px;padding:10px 12px;border-radius:var(--r);background:rgba(31,138,76,.08);font-size:13px"></div>
         <div style="display:flex;gap:8px;margin-bottom:16px">
           <button class="btn btn-primary btn-sm" id="pmModDiasBtn" onclick="pmKioskSetModalidad('dias')" style="flex:1">📅 Días completos</button>
           <button class="btn btn-secondary btn-sm" id="pmModHorasBtn" onclick="pmKioskSetModalidad('horas')" style="flex:1">⏱ Por horas</button>
@@ -827,11 +828,10 @@
       <div class="card">
         <div class="card-toolbar">
           <div class="card-toolbar-left">
-            <button class="btn btn-primary" onclick="openAddWorker()">+ Nuevo</button>
-            <button class="btn btn-secondary" onclick="downloadTemplate()">📥 Plantilla</button>
-            <label class="btn btn-secondary" style="cursor:pointer;">
-              📤 Importar <input type="file" accept=".xlsx,.xls" style="display:none;" onchange="uploadWorkers(event)">
-            </label>
+            <div style="font-size:12px;color:var(--ink-soft);max-width:520px;line-height:1.4">
+              Los trabajadores vienen de <b>Persico Suite → Recursos Humanos → Control de Personal</b> (misma base de datos).
+              Altas, bajas, nombre, puesto y área se manejan ahí; aquí se configura la jornada, los puntos de registro, los jobs permitidos y el PIN.
+            </div>
           </div>
           <div class="card-toolbar-right">
             <input type="text" placeholder="🔍 Buscar…" style="width:200px;" oninput="filterWorkers(this.value)" />
@@ -1340,18 +1340,10 @@
   <div class="modal">
     <div class="modal-drag"></div>
     <div class="modal-title" id="workerModalTitle">Nuevo Trabajador</div>
-    <div class="form-group"><label>Nombre completo</label><input id="wName" type="text" placeholder="Ej. Juan Pérez García" /></div>
-    <div class="form-group"><label>Puesto</label><input id="wPosition" type="text" placeholder="Ej. Técnico de Mantenimiento" /></div>
-    <div class="form-group">
-      <label>Área</label>
-      <select id="wArea">
-        <option value="">— Sin asignar —</option>
-        <option value="Assembly">Assembly</option>
-        <option value="Manufacturing">Manufacturing</option>
-        <option value="Mechanical Eng">Mechanical Eng.</option>
-        <option value="Electrical Eng">Electrical Eng.</option>
-      </select>
-    </div>
+    <div style="font-size:11px;color:var(--ink-soft);margin:-4px 0 10px">Nombre, puesto y área se editan en Persico Suite (Control de Personal).</div>
+    <div class="form-group"><label>Nombre completo</label><input id="wName" type="text" disabled /></div>
+    <div class="form-group"><label>Puesto</label><input id="wPosition" type="text" disabled /></div>
+    <div class="form-group"><label>Área</label><input id="wArea" type="text" disabled /></div>
     <div class="form-group">
       <label>Allowed Jobs <span style="font-weight:400;text-transform:none;letter-spacing:0;color:var(--ink-soft);font-size:11px;">— Números de proyecto separados por coma</span></label>
       <input id="wAllowedJobs" type="text" placeholder="Ej. P-001, P-002, P-015" />
@@ -1604,12 +1596,28 @@ async function pmKioskSubmit(){
     if (!r.ok) { pmShowAlert(data.error || 'Error al enviar la solicitud', 'error'); return; }
     pmShowAlert('Solicitud enviada ✓ Se avisará a tu Jefe Directo y a RRHH.', 'success');
     ['pmMotivo','pmFechaInicio','pmFechaFin','pmFechaH','pmHoraInicio','pmHoraFin'].forEach(id => document.getElementById(id).value = '');
-    pmKioskLoadStatus();
+    pmKioskLoadStatus(); pmKioskVacaciones();
   } catch (e) {
     pmShowAlert('Error de conexión: ' + e.message, 'error');
   } finally {
     btn.disabled = false; btn.textContent = 'Enviar Solicitud →';
   }
+}
+
+// Saldo de vacaciones (desde Recursos Humanos de la Suite) al elegir "Vacaciones"
+async function pmKioskVacaciones(){
+  const box = document.getElementById('pmVacSaldo');
+  if (!box) return;
+  if (document.getElementById('pmTipo').value !== 'Vacaciones' || !currentUser) { box.style.display = 'none'; return; }
+  box.style.display = ''; box.innerHTML = 'Consultando tus vacaciones…';
+  try {
+    const r = await fetch('/api/vacaciones/' + currentUser.id);
+    const d = await r.json();
+    if (!r.ok) { box.innerHTML = `<span style="color:var(--red)">${d.error || 'No se pudo consultar el saldo'}</span>`; return; }
+    const color = d.saldo < 0 ? 'var(--red)' : '#1f8a4c';
+    box.innerHTML = `🏖 Días disponibles: <b style="font-size:16px;color:${color}">${d.saldo}</b>
+      <div style="font-size:11px;color:var(--ink-soft);margin-top:2px">Ganados ${d.ganados} · gozados ${d.gozados}${d.pendientes ? ` · ${d.pendientes} en solicitudes por aprobar` : ''} · antigüedad ${d.anios} año(s)</div>`;
+  } catch (e) { box.innerHTML = `<span style="color:var(--red)">Error de conexión: ${e.message}</span>`; }
 }
 
 async function pmKioskLoadStatus(){
@@ -2117,7 +2125,7 @@ function showPanel(id) {
   if (id === 'ubicaciones') setTimeout(initMap, 100);
   if (id === 'reportes') { populateFilterWorker(); loadReports(); }
   if (id === 'usuarios') { renderUsersTable().then(() => { loadSigners(); }); }
-  if (id === 'permisos') pmKioskLoadStatus();
+  if (id === 'permisos') { pmKioskLoadStatus(); pmKioskVacaciones(); }
   if (id === 'ordenes-servicio') osKioskLoadList();
   if (id === 'tareas-asignadas') taKioskLoadList();
   if (id === 'notificaciones') loadNotifications();
@@ -2700,7 +2708,7 @@ function renderWorkersTable(filter='') {
         const jobs = (w.allowedJobs || []);
         const jobsHtml = jobs.length ? jobs.map(j => `<span class="badge badge-amber" style="margin:1px;font-size:10px;">${j}</span>`).join(' ') : '<span style="color:var(--ink-soft);font-size:12px;">—</span>';
         return `<tr>
-          <td><strong>${w.name}</strong></td>
+          <td><strong>${w.name}</strong>${w.active === false ? ' <span class="badge badge-red" style="font-size:10px">Baja</span>' : ''}${w.pin ? ' <span title="Tiene PIN" style="font-size:11px">🔒</span>' : ''}</td>
           <td>${w.position || '—'}</td>
           <td>${w.area ? `<span class="badge badge-green">${w.area}</span>` : '<span style="color:var(--ink-soft)">—</span>'}</td>
           <td>${jobsHtml}</td>
@@ -2708,7 +2716,7 @@ function renderWorkersTable(filter='') {
           <td>${getWorkerLocationNames(w)}</td>
           <td style="display:flex;gap:6px;">
             <button class="btn btn-secondary btn-sm" onclick="editWorker('${w.id}')">✏️ Editar</button>
-            <button class="btn btn-danger btn-sm" onclick="deleteWorker('${w.id}')">🗑</button>
+
           </td>
         </tr>`;
       }).join('');
@@ -2735,7 +2743,7 @@ function renderWorkersTable(filter='') {
           </div>
           <div class="card-row-actions">
             <button class="btn btn-secondary btn-sm" onclick="editWorker('${w.id}')">✏️ Editar</button>
-            <button class="btn btn-danger btn-sm" onclick="deleteWorker('${w.id}')">🗑 Eliminar</button>
+
           </div>
         </div>`;
       }).join('');
@@ -2840,12 +2848,12 @@ async function saveWorker() {
     locationIds,
     locationId: locationIds[0] || ''
   };
-  if (!data.name) return toast('El nombre es requerido', 'error');
-  const url = id ? `/api/workers/${id}` : '/api/workers';
-  const method = id ? 'PUT' : 'POST';
+  if (!id) return toast('Los trabajadores se dan de alta en Persico Suite (Control de Personal)', 'error');
+  const url = `/api/workers/${id}`;
+  const method = 'PUT';
   const r = await fetch(url, { method, headers:{'Content-Type':'application/json'}, body: JSON.stringify(data) });
   if (r.ok) {
-    toast(id ? 'Trabajador actualizado' : 'Trabajador creado', 'success');
+    toast('Configuración del trabajador actualizada', 'success');
     await loadWorkers(); renderWorkersTable(); closeModal('workerModal');
     populateFilterWorker();
   } else { const d = await r.json(); toast(d.error, 'error'); }

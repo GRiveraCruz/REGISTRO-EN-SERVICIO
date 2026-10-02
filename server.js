@@ -1,289 +1,210 @@
+// ═════════════════════════════════════════════════════════════════════════════
+//  Persico — Kiosco de Asistencia (registro en servicio)
+//  v2: los datos viven en la MISMA base de datos PostgreSQL de Persico Suite.
+//  · Trabajadores = tabla `personal` de la Suite (ya no se sincronizan ni se duplican).
+//  · El kiosco guarda su configuración propia por trabajador (PIN, jornada, puntos de
+//    registro, jobs permitidos) y sus registros, ubicaciones, usuarios, firmas y
+//    notificaciones en tablas `kiosco_*`.
+//  · Permisos, vacaciones, órdenes de servicio y tareas se siguen pidiendo a la Suite por
+//    HTTP (SUITE_URL + SYNC_API_KEY), porque ahí viven sus reglas de negocio.
+// ═════════════════════════════════════════════════════════════════════════════
 const express = require('express');
 const path = require('path');
 const fs = require('fs');
+const crypto = require('crypto');
 const multer = require('multer');
 const XLSX = require('xlsx');
 const bodyParser = require('body-parser');
+const bcrypt = require('bcryptjs');
 const { v4: uuidv4 } = require('uuid');
+const db = require('./db');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
 const SYNC_API_KEY = process.env.SYNC_API_KEY || '';
 const SUITE_URL = (process.env.SUITE_URL || '').replace(/\/$/, '');
+// Secreto para guardar los PIN como HMAC (no en texto plano). Si no se define, se usa la
+// llave de sincronización; cambiarlo invalida los PIN existentes.
+const PIN_SECRET = process.env.KIOSCO_PIN_SECRET || SYNC_API_KEY || 'persico-kiosco';
+const DATA_DIR = path.join(__dirname, 'data');           // solo para migrar los JSON antiguos
 
-// Data file paths
-const DATA_DIR = path.join(__dirname, 'data');
-const USERS_FILE = path.join(DATA_DIR, 'users.json');
-const WORKERS_FILE = path.join(DATA_DIR, 'workers.json');
-const LOCATIONS_FILE = path.join(DATA_DIR, 'locations.json');
-const RECORDS_FILE = path.join(DATA_DIR, 'records.json');
-const SIGNATURES_FILE = path.join(DATA_DIR, 'signatures.json');
-const NOTIFICATIONS_FILE = path.join(DATA_DIR, 'notifications.json');
-
-// Ensure data directory exists
-if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true });
-
-// Initialize data files with defaults
-function initFile(filePath, defaultData) {
-  if (!fs.existsSync(filePath)) {
-    fs.writeFileSync(filePath, JSON.stringify(defaultData, null, 2));
-  }
-}
-
-initFile(USERS_FILE, [
-  { id: '1', username: 'admin', password: 'admin123', role: 'admin', name: 'Administrador' },
-  { id: '2', username: 'rrhh', password: 'rrhh123', role: 'rrhh', name: 'Recursos Humanos' }
-]);
-initFile(WORKERS_FILE, []);
-initFile(LOCATIONS_FILE, []);
-initFile(RECORDS_FILE, []);
-initFile(SIGNATURES_FILE, []);
-initFile(NOTIFICATIONS_FILE, [
-  { name: '', phone: '', apikey: '', active: false },
-  { name: '', phone: '', apikey: '', active: false },
-  { name: '', phone: '', apikey: '', active: false },
-  { name: '', phone: '', apikey: '', active: false },
-  { name: '', phone: '', apikey: '', active: false },
-]);
-
-// Helpers
-const readJSON = (file) => JSON.parse(fs.readFileSync(file, 'utf8'));
-const writeJSON = (file, data) => fs.writeFileSync(file, JSON.stringify(data, null, 2));
-
-// Middleware
-app.use(bodyParser.json());
+app.use(bodyParser.json({ limit: '5mb' }));
 app.use(bodyParser.urlencoded({ extended: true }));
 app.use(express.static(path.join(__dirname, 'public')));
-
 const upload = multer({ storage: multer.memoryStorage() });
 
-// ─── AUTH ────────────────────────────────────────────────────────────────────
-app.post('/api/login', (req, res) => {
-  const { username, password } = req.body;
-  const users = readJSON(USERS_FILE);
-  const user = users.find(u => u.username === username && u.password === password);
-  if (!user) return res.status(401).json({ error: 'Credenciales incorrectas' });
-  const { password: _, ...safeUser } = user;
-  res.json({ success: true, user: safeUser });
+// Envuelve handlers async para que un error de base de datos responda 500 en vez de tumbar el proceso
+const aw = (fn) => (req, res, next) => Promise.resolve(fn(req, res, next)).catch(e => {
+  console.error('[kiosco]', req.method, req.path, e);
+  if (!res.headersSent) res.status(500).json({ error: 'Error del servidor: ' + e.message });
 });
 
-// ─── USERS CRUD ───────────────────────────────────────────────────────────────
-app.get('/api/users', (req, res) => {
-  const users = readJSON(USERS_FILE).map(({ password: _, ...u }) => u);
-  res.json(users);
-});
+const hashPin = (pin) => crypto.createHmac('sha256', PIN_SECRET).update(String(pin)).digest('hex');
+const DEFAULT_NOTIF = Array.from({ length: 5 }, () => ({ name: '', phone: '', apikey: '', active: false }));
+async function leerNotificaciones() { return await db.getConfig('notificaciones', DEFAULT_NOTIF); }
 
-app.post('/api/users', (req, res) => {
-  const users = readJSON(USERS_FILE);
-  const { name, username, password, role } = req.body;
-  if (!name || !username || !password) return res.status(400).json({ error: 'Nombre, usuario y contraseña son requeridos' });
-  if (users.find(u => u.username === username)) return res.status(400).json({ error: 'El nombre de usuario ya existe' });
-  const user = { id: uuidv4(), name, username, password, role: role || 'worker', createdAt: new Date().toISOString() };
-  users.push(user);
-  writeJSON(USERS_FILE, users);
-  const { password: _, ...safeUser } = user;
-  res.json({ success: true, user: safeUser });
-});
-
-app.put('/api/users/:id', (req, res) => {
-  const users = readJSON(USERS_FILE);
-  const idx = users.findIndex(u => u.id === req.params.id);
-  if (idx === -1) return res.status(404).json({ error: 'Usuario no encontrado' });
-  const { name, username, password, role } = req.body;
-  // Check username collision with other users
-  if (username && users.find(u => u.username === username && u.id !== req.params.id)) {
-    return res.status(400).json({ error: 'El nombre de usuario ya está en uso' });
-  }
-  users[idx] = {
-    ...users[idx],
-    ...(name && { name }),
-    ...(username && { username }),
-    ...(password && { password }),  // only update if provided
-    ...(role && { role })
+// ─── TRABAJADORES (de Control de Personal de la Suite) ───────────────────────
+// Forma de cada trabajador en la API (igual que antes, para no cambiar el frontend):
+// { id: tid, externalId: tid, name, position, area, active, shiftStart, shiftEnd,
+//   allowedJobs, locationIds, locationId, pin: true|undefined }
+function filaATrabajador(r) {
+  const d = r.data || {};
+  const cfg = r.cfg || {};
+  return {
+    id: r.tid, externalId: r.tid,
+    name: r.nombre || d.nombre || '',
+    position: d.puesto || '',
+    area: r.area || d.area || '',
+    active: (d.estado || 'Activo') !== 'Baja',
+    shiftStart: cfg.shiftStart || '07:00',
+    shiftEnd: cfg.shiftEnd || '17:00',
+    allowedJobs: cfg.allowedJobs || [],
+    locationIds: cfg.locationIds || (cfg.locationId ? [cfg.locationId] : []),
+    locationId: (cfg.locationIds || [])[0] || cfg.locationId || '',
+    pin: r.pin_hash ? true : undefined,
   };
-  writeJSON(USERS_FILE, users);
-  const { password: _, ...safeUser } = users[idx];
-  res.json({ success: true, user: safeUser });
-});
-
-app.delete('/api/users/:id', (req, res) => {
-  let users = readJSON(USERS_FILE);
-  const user = users.find(u => u.id === req.params.id);
-  if (!user) return res.status(404).json({ error: 'Usuario no encontrado' });
-  // Prevent deleting the last admin
-  const admins = users.filter(u => u.role === 'admin');
-  if (user.role === 'admin' && admins.length <= 1) {
-    return res.status(400).json({ error: 'No puedes eliminar el único administrador del sistema' });
-  }
-  users = users.filter(u => u.id !== req.params.id);
-  writeJSON(USERS_FILE, users);
-  res.json({ success: true });
-});
-
-// ─── WORKERS ─────────────────────────────────────────────────────────────────
-app.get('/api/workers', (req, res) => res.json(readJSON(WORKERS_FILE)));
-
-app.post('/api/workers', (req, res) => {
-  const workers = readJSON(WORKERS_FILE);
-  const worker = { id: uuidv4(), ...req.body, createdAt: new Date().toISOString() };
-  workers.push(worker);
-  writeJSON(WORKERS_FILE, workers);
-  res.json({ success: true, worker });
-});
-
-app.put('/api/workers/:id', (req, res) => {
-  const workers = readJSON(WORKERS_FILE);
-  const idx = workers.findIndex(w => w.id === req.params.id);
-  if (idx === -1) return res.status(404).json({ error: 'Trabajador no encontrado' });
-  workers[idx] = { ...workers[idx], ...req.body };
-  writeJSON(WORKERS_FILE, workers);
-  res.json({ success: true, worker: workers[idx] });
-});
-
-app.delete('/api/workers/:id', (req, res) => {
-  let workers = readJSON(WORKERS_FILE);
-  workers = workers.filter(w => w.id !== req.params.id);
-  writeJSON(WORKERS_FILE, workers);
-  res.json({ success: true });
-});
-
-// ─── PIN personal (para identificarse sin depender de elegir de una lista) ───
-app.post('/api/workers/:id/set-pin', (req, res) => {
-  const { pin } = req.body;
-  if (!pin || !/^\d{4,6}$/.test(String(pin))) {
-    return res.status(400).json({ error: 'El PIN debe ser numérico, de 4 a 6 dígitos' });
-  }
-  const workers = readJSON(WORKERS_FILE);
-  const idx = workers.findIndex(w => w.id === req.params.id);
-  if (idx === -1) return res.status(404).json({ error: 'Trabajador no encontrado' });
-  const dup = workers.find(w => w.id !== req.params.id && w.pin && String(w.pin) === String(pin));
-  if (dup) return res.status(400).json({ error: 'Ese PIN ya está en uso por otro trabajador — elige uno diferente' });
-  workers[idx].pin = String(pin);
-  writeJSON(WORKERS_FILE, workers);
-  res.json({ success: true });
-});
-
-app.post('/api/workers/login-pin', (req, res) => {
-  const { pin } = req.body;
-  if (!pin) return res.status(400).json({ error: 'Ingresa tu PIN' });
-  const workers = readJSON(WORKERS_FILE);
-  const worker = workers.find(w => w.pin && String(w.pin) === String(pin) && w.active !== false);
-  if (!worker) return res.status(404).json({ error: 'PIN incorrecto, o tu cuenta aún no tiene uno configurado' });
-  res.json({ success: true, worker });
-});
-
-// Revocar el PIN de un trabajador (para cuando lo olvida) — uso de Administrador/RRHH
-app.delete('/api/workers/:id/pin', (req, res) => {
-  const workers = readJSON(WORKERS_FILE);
-  const idx = workers.findIndex(w => w.id === req.params.id);
-  if (idx === -1) return res.status(404).json({ error: 'Trabajador no encontrado' });
-  delete workers[idx].pin;
-  writeJSON(WORKERS_FILE, workers);
-  res.json({ success: true });
-});
-
-// Upload workers via Excel
-app.post('/api/workers/upload', upload.single('file'), (req, res) => {
-  try {
-    const workbook = XLSX.read(req.file.buffer, { type: 'buffer' });
-    const sheet = workbook.Sheets[workbook.SheetNames[0]];
-    const rows = XLSX.utils.sheet_to_json(sheet);
-    const workers = readJSON(WORKERS_FILE);
-    const added = [];
-    rows.forEach(row => {
-      const locRaw = row['Ubicaciones'] || row['ubicaciones'] || row['Ubicacion'] || row['ubicacion'] || '';
-      const locationIds = String(locRaw).split(',').map(s => s.trim()).filter(Boolean);
-      const worker = {
-        id: uuidv4(),
-        name: row['Nombre'] || row['nombre'] || '',
-        position: row['Puesto'] || row['puesto'] || '',
-        shift: row['Jornada'] || row['jornada'] || '07:00-17:00',
-        locationIds,
-        locationId: locationIds[0] || '',
-        createdAt: new Date().toISOString()
-      };
-      if (worker.name) { workers.push(worker); added.push(worker); }
-    });
-    writeJSON(WORKERS_FILE, workers);
-    res.json({ success: true, added: added.length, workers: added });
-  } catch (e) {
-    res.status(400).json({ error: 'Error al procesar el archivo: ' + e.message });
-  }
-});
-
-// Download workers template
-app.get('/api/workers/template', (req, res) => {
-  const wb = XLSX.utils.book_new();
-  const ws = XLSX.utils.aoa_to_sheet([
-    ['Nombre', 'Puesto', 'Jornada', 'Ubicaciones (separar con coma si son varias)'],
-    ['Juan Pérez', 'Técnico', '07:00-17:00', 'Planta Norte'],
-    ['María López', 'Supervisor', '08:00-18:00', 'Planta Norte, Planta Sur']
-  ]);
-  ws['!cols'] = [{ wch: 30 }, { wch: 20 }, { wch: 15 }, { wch: 45 }];
-  XLSX.utils.book_append_sheet(wb, ws, 'Trabajadores');
-  const buffer = XLSX.write(wb, { type: 'buffer', bookType: 'xlsx' });
-  res.setHeader('Content-Disposition', 'attachment; filename="plantilla_trabajadores.xlsx"');
-  res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
-  res.send(buffer);
-});
-
-// ─── SYNC WITH PERSICO SUITE ─────────────────────────────────────────────────
-// Persico Suite (Control de Personal) es la fuente de verdad de trabajadores.
-// Este endpoint recibe la lista completa de trabajadores activos y hace upsert
-// por "externalId" (el tid de la Suite), SIN tocar shift/locationId (config
-// propia de esta app), y SIN borrar históricos: a los que ya no vienen en la
-// lista los marca inactive=true en vez de eliminarlos (sus records se conservan).
-function requireSyncKey(req, res, next) {
-  if (!SYNC_API_KEY) return res.status(500).json({ error: 'SYNC_API_KEY no configurada en el servidor' });
-  const key = req.headers['x-sync-key'];
-  if (key !== SYNC_API_KEY) return res.status(401).json({ error: 'Clave de sincronización inválida' });
-  next();
+}
+const SQL_TRABAJADORES = `SELECT p.tid, p.nombre, p.area, p.data, k.data AS cfg, k.pin_hash
+  FROM personal p LEFT JOIN kiosco_trabajadores k ON k.tid = p.tid`;
+async function listarTrabajadores() {
+  const r = await db.q(SQL_TRABAJADORES + ' ORDER BY p.nombre');
+  return r.rows.map(filaATrabajador);
+}
+async function trabajadorPorId(id) {
+  const r = await db.q(SQL_TRABAJADORES + ' WHERE p.tid = $1', [String(id || '')]);
+  return r.rows.length ? filaATrabajador(r.rows[0]) : null;
+}
+async function guardarCfgTrabajador(tid, cambios) {
+  await db.q(`INSERT INTO kiosco_trabajadores (tid, data, updated_at) VALUES ($1, $2, now())
+              ON CONFLICT (tid) DO UPDATE SET data = kiosco_trabajadores.data || EXCLUDED.data, updated_at = now()`,
+             [tid, JSON.stringify(cambios)]);
 }
 
-app.post('/api/workers/sync', requireSyncKey, (req, res) => {
-  const incoming = Array.isArray(req.body.workers) ? req.body.workers : [];
-  const workers = readJSON(WORKERS_FILE);
-  const incomingIds = new Set(incoming.map(w => w.externalId).filter(Boolean));
+// ─── AUTH (usuarios administrativos del kiosco) ──────────────────────────────
+app.post('/api/login', aw(async (req, res) => {
+  const { username, password } = req.body;
+  const r = await db.q('SELECT * FROM kiosco_usuarios WHERE username = $1', [String(username || '')]);
+  const u = r.rows[0];
+  if (!u || !(await bcrypt.compare(String(password || ''), u.password_hash))) return res.status(401).json({ error: 'Credenciales incorrectas' });
+  res.json({ success: true, user: { id: u.id, username: u.username, role: u.role, name: u.name } });
+}));
 
-  let created = 0, updated = 0, deactivated = 0;
+app.get('/api/users', aw(async (req, res) => {
+  const r = await db.q('SELECT id, username, role, name, created_at AS "createdAt" FROM kiosco_usuarios ORDER BY name');
+  res.json(r.rows);
+}));
 
-  incoming.forEach(src => {
-    if (!src.externalId || !src.name) return;
-    const idx = workers.findIndex(w => w.externalId === src.externalId);
-    if (idx === -1) {
-      workers.push({
-        id: uuidv4(),
-        externalId: src.externalId,
-        name: src.name,
-        position: src.position || '',
-        area: src.area || '',
-        shift: '07:00-17:00',
-        locationIds: [],
-        locationId: '',
-        active: true,
-        createdAt: new Date().toISOString(),
-      });
-      created++;
-    } else {
-      workers[idx].name = src.name;
-      workers[idx].position = src.position || workers[idx].position;
-      workers[idx].area = src.area || workers[idx].area;
-      workers[idx].active = true;
-      updated++;
-    }
-  });
+app.post('/api/users', aw(async (req, res) => {
+  const { name, username, password, role } = req.body;
+  if (!name || !username || !password) return res.status(400).json({ error: 'Nombre, usuario y contraseña son requeridos' });
+  const id = uuidv4();
+  try {
+    await db.q('INSERT INTO kiosco_usuarios (id, username, password_hash, role, name) VALUES ($1,$2,$3,$4,$5)',
+               [id, username, await bcrypt.hash(password, 10), role || 'worker', name]);
+  } catch (e) {
+    if (e.code === '23505') return res.status(400).json({ error: 'El nombre de usuario ya existe' });
+    throw e;
+  }
+  res.json({ success: true, user: { id, name, username, role: role || 'worker' } });
+}));
 
-  // Trabajadores con externalId que ya no vienen en la lista de la Suite (dados de baja / eliminados) → inactive
-  workers.forEach(w => {
-    if (w.externalId && !incomingIds.has(w.externalId) && w.active !== false) {
-      w.active = false;
-      deactivated++;
-    }
-  });
+app.put('/api/users/:id', aw(async (req, res) => {
+  const { name, username, password, role } = req.body;
+  const cur = (await db.q('SELECT * FROM kiosco_usuarios WHERE id = $1', [req.params.id])).rows[0];
+  if (!cur) return res.status(404).json({ error: 'Usuario no encontrado' });
+  try {
+    await db.q('UPDATE kiosco_usuarios SET name=$2, username=$3, role=$4, password_hash=$5 WHERE id=$1',
+               [cur.id, name || cur.name, username || cur.username, role || cur.role,
+                password ? await bcrypt.hash(password, 10) : cur.password_hash]);
+  } catch (e) {
+    if (e.code === '23505') return res.status(400).json({ error: 'El nombre de usuario ya está en uso' });
+    throw e;
+  }
+  res.json({ success: true, user: { id: cur.id, name: name || cur.name, username: username || cur.username, role: role || cur.role } });
+}));
 
-  writeJSON(WORKERS_FILE, workers);
-  res.json({ success: true, created, updated, deactivated, total: workers.length });
-});
+app.delete('/api/users/:id', aw(async (req, res) => {
+  const cur = (await db.q('SELECT * FROM kiosco_usuarios WHERE id = $1', [req.params.id])).rows[0];
+  if (!cur) return res.status(404).json({ error: 'Usuario no encontrado' });
+  if (cur.role === 'admin') {
+    const n = (await db.q("SELECT count(*)::int AS n FROM kiosco_usuarios WHERE role = 'admin'")).rows[0].n;
+    if (n <= 1) return res.status(400).json({ error: 'No puedes eliminar el único administrador del sistema' });
+  }
+  await db.q('DELETE FROM kiosco_usuarios WHERE id = $1', [cur.id]);
+  res.json({ success: true });
+}));
+
+// ─── WORKERS ─────────────────────────────────────────────────────────────────
+app.get('/api/workers', aw(async (req, res) => res.json(await listarTrabajadores())));
+
+const MSG_ALTA_SUITE = 'Los trabajadores se dan de alta, se editan y se dan de baja en Persico Suite → Recursos Humanos → Control de Personal. El kiosco los toma de ahí automáticamente.';
+app.post('/api/workers', (req, res) => res.status(400).json({ error: MSG_ALTA_SUITE }));
+app.delete('/api/workers/:id', (req, res) => res.status(400).json({ error: MSG_ALTA_SUITE }));
+app.post('/api/workers/upload', (req, res) => res.status(400).json({ error: MSG_ALTA_SUITE }));
+app.get('/api/workers/template', (req, res) => res.status(400).json({ error: MSG_ALTA_SUITE }));
+
+// Solo la configuración propia del kiosco (jornada, puntos de registro, jobs permitidos).
+// Nombre, puesto y área vienen de la Suite y aquí no se modifican.
+app.put('/api/workers/:id', aw(async (req, res) => {
+  const w = await trabajadorPorId(req.params.id);
+  if (!w) return res.status(404).json({ error: 'Trabajador no encontrado en Control de Personal' });
+  const b = req.body || {};
+  const cambios = {};
+  for (const k of ['shiftStart', 'shiftEnd', 'allowedJobs', 'locationIds']) if (k in b) cambios[k] = b[k];
+  if ('locationIds' in b) cambios.locationId = (b.locationIds || [])[0] || '';
+  await guardarCfgTrabajador(w.id, cambios);
+  res.json({ success: true, worker: await trabajadorPorId(w.id) });
+}));
+
+// Compatibilidad con versiones anteriores de la Suite: ya no hay nada que sincronizar.
+app.post('/api/workers/sync', (req, res) => res.json({ success: true, created: 0, updated: 0, deactivated: 0,
+  mensaje: 'El kiosco lee Control de Personal directamente desde la base de datos; no es necesario sincronizar.' }));
+
+// ─── PIN personal ────────────────────────────────────────────────────────────
+app.post('/api/workers/:id/set-pin', aw(async (req, res) => {
+  const { pin } = req.body;
+  if (!pin || !/^\d{4,6}$/.test(String(pin))) return res.status(400).json({ error: 'El PIN debe ser numérico, de 4 a 6 dígitos' });
+  const w = await trabajadorPorId(req.params.id);
+  if (!w) return res.status(404).json({ error: 'Trabajador no encontrado' });
+  try {
+    await db.q(`INSERT INTO kiosco_trabajadores (tid, pin_hash, updated_at) VALUES ($1, $2, now())
+                ON CONFLICT (tid) DO UPDATE SET pin_hash = EXCLUDED.pin_hash, updated_at = now()`, [w.id, hashPin(pin)]);
+  } catch (e) {
+    if (e.code === '23505') return res.status(400).json({ error: 'Ese PIN ya está en uso por otro trabajador — elige uno diferente' });
+    throw e;
+  }
+  res.json({ success: true });
+}));
+
+app.post('/api/workers/login-pin', aw(async (req, res) => {
+  const { pin } = req.body;
+  if (!pin) return res.status(400).json({ error: 'Ingresa tu PIN' });
+  const r = await db.q(SQL_TRABAJADORES + ' WHERE k.pin_hash = $1', [hashPin(pin)]);
+  const w = r.rows.length ? filaATrabajador(r.rows[0]) : null;
+  if (!w || !w.active) return res.status(404).json({ error: 'PIN incorrecto, o tu cuenta aún no tiene uno configurado' });
+  res.json({ success: true, worker: w });
+}));
+
+app.delete('/api/workers/:id/pin', aw(async (req, res) => {
+  const r = await db.q('UPDATE kiosco_trabajadores SET pin_hash = NULL, updated_at = now() WHERE tid = $1', [req.params.id]);
+  if (!r.rowCount && !(await trabajadorPorId(req.params.id))) return res.status(404).json({ error: 'Trabajador no encontrado' });
+  res.json({ success: true });
+}));
+
+// ─── VACACIONES (saldo, desde la Suite) ──────────────────────────────────────
+app.get('/api/vacaciones/:workerId', aw(async (req, res) => {
+  if (!SUITE_URL) return res.status(500).json({ error: 'SUITE_URL no está configurada en el servidor' });
+  const w = await trabajadorPorId(req.params.workerId);
+  if (!w) return res.status(404).json({ error: 'Trabajador no encontrado' });
+  try {
+    const r = await fetch(`${SUITE_URL}/api/vacaciones/externo/${encodeURIComponent(w.id)}`, { headers: { 'X-Sync-Key': SYNC_API_KEY } });
+    const data = await r.json();
+    if (!r.ok) return res.status(r.status).json(data);
+    res.json(data);
+  } catch (e) {
+    res.status(502).json({ error: 'No se pudo conectar con Recursos Humanos: ' + e.message });
+  }
+}));
 
 // ─── PERMISOS (solicitud y estatus, hacia Persico Suite) ─────────────────────
 // El trabajador ya está identificado en el kiosco por su selección de nombre.
@@ -300,7 +221,7 @@ function periodoTexto({ modalidad, fecha_inicio, fecha_fin, fecha, hora_inicio, 
 
 async function notificarNuevoPermisoWhatsApp(worker, body) {
   let destinos;
-  try { destinos = readJSON(NOTIFICATIONS_FILE); } catch (e) { destinos = []; }
+  try { destinos = await leerNotificaciones(); } catch (e) { destinos = []; }
   const activos = destinos.filter(d => d.active && d.phone && d.apikey);
   if (!activos.length) return;
 
@@ -313,9 +234,9 @@ async function notificarNuevoPermisoWhatsApp(worker, body) {
   }
 }
 
-app.get('/api/notifications', (req, res) => res.json(readJSON(NOTIFICATIONS_FILE)));
+app.get('/api/notifications', aw(async (req, res) => res.json(await leerNotificaciones())));
 
-app.put('/api/notifications', (req, res) => {
+app.put('/api/notifications', aw(async (req, res) => {
   const incoming = Array.isArray(req.body.notifications) ? req.body.notifications : [];
   const clean = [];
   for (let i = 0; i < 5; i++) {
@@ -327,12 +248,12 @@ app.put('/api/notifications', (req, res) => {
       active: !!n.active,
     });
   }
-  writeJSON(NOTIFICATIONS_FILE, clean);
+  await db.setConfig('notificaciones', clean);
   res.json({ success: true });
-});
+}));
 
-app.post('/api/notifications/test/:index', async (req, res) => {
-  const destinos = readJSON(NOTIFICATIONS_FILE);
+app.post('/api/notifications/test/:index', aw(async (req, res) => {
+  const destinos = await leerNotificaciones();
   const d = destinos[req.params.index];
   if (!d || !d.phone || !d.apikey) return res.status(400).json({ error: 'Completa teléfono y apikey primero' });
   try {
@@ -344,17 +265,16 @@ app.post('/api/notifications/test/:index', async (req, res) => {
   } catch (e) {
     res.status(502).json({ error: 'No se pudo contactar a CallMeBot: ' + e.message });
   }
-});
+}));
 
-app.post('/api/permisos', async (req, res) => {
+app.post('/api/permisos', aw(async (req, res) => {
   if (!SUITE_URL) return res.status(500).json({ error: 'SUITE_URL no está configurada en el servidor' });
   const { workerId, tipo, modalidad, fecha_inicio, fecha_fin, fecha, hora_inicio, hora_fin, motivo } = req.body;
   if (!workerId) return res.status(400).json({ error: 'Falta identificar al trabajador' });
 
-  const workers = readJSON(WORKERS_FILE);
-  const worker = workers.find(w => w.id === workerId);
+  const worker = await trabajadorPorId(workerId);
   if (!worker) return res.status(404).json({ error: 'Trabajador no encontrado' });
-  if (!worker.externalId) return res.status(400).json({ error: 'Tu usuario aún no está vinculado con Recursos Humanos. Contacta a RRHH.' });
+  if (!worker.active) return res.status(400).json({ error: 'Este trabajador no está activo en Recursos Humanos.' });
 
   try {
     const r = await fetch(`${SUITE_URL}/api/permisos/externo`, {
@@ -369,14 +289,12 @@ app.post('/api/permisos', async (req, res) => {
   } catch (e) {
     res.status(502).json({ error: 'No se pudo conectar con Recursos Humanos: ' + e.message });
   }
-});
+}));
 
-app.get('/api/permisos/:workerId', async (req, res) => {
+app.get('/api/permisos/:workerId', aw(async (req, res) => {
   if (!SUITE_URL) return res.status(500).json({ error: 'SUITE_URL no está configurada en el servidor' });
-  const workers = readJSON(WORKERS_FILE);
-  const worker = workers.find(w => w.id === req.params.workerId);
+  const worker = await trabajadorPorId(req.params.workerId);
   if (!worker) return res.status(404).json({ error: 'Trabajador no encontrado' });
-  if (!worker.externalId) return res.json([]); // aún sin vincular: no hay historial que mostrar
 
   try {
     const r = await fetch(`${SUITE_URL}/api/permisos/externo/${encodeURIComponent(worker.externalId)}`, {
@@ -388,22 +306,20 @@ app.get('/api/permisos/:workerId', async (req, res) => {
   } catch (e) {
     res.status(502).json({ error: 'No se pudo conectar con Recursos Humanos: ' + e.message });
   }
-});
+}));
 
 // ─── ÓRDENES DE SERVICIO (solo lectura + avance, hacia Persico Suite) ────────
-function _osWorkerOrError(req, res) {
+async function _osWorkerOrError(req, res) {
   const workerId = req.query.workerId || (req.body && req.body.workerId);
   if (!workerId) { res.status(400).json({ error: 'Falta identificar al trabajador' }); return null; }
-  const workers = readJSON(WORKERS_FILE);
-  const worker = workers.find(w => w.id === workerId);
+  const worker = await trabajadorPorId(workerId);
   if (!worker) { res.status(404).json({ error: 'Trabajador no encontrado' }); return null; }
-  if (!worker.externalId) { res.status(400).json({ error: 'Tu usuario aún no está vinculado con Recursos Humanos. Contacta a RRHH.' }); return null; }
   return worker;
 }
 
-app.get('/api/ordenes-servicio', async (req, res) => {
+app.get('/api/ordenes-servicio', aw(async (req, res) => {
   if (!SUITE_URL) return res.status(500).json({ error: 'SUITE_URL no está configurada en el servidor' });
-  const worker = _osWorkerOrError(req, res); if (!worker) return;
+  const worker = await _osWorkerOrError(req, res); if (!worker) return;
   try {
     const r = await fetch(`${SUITE_URL}/api/ordenes-servicio/externo/${encodeURIComponent(worker.externalId)}`, {
       headers: { 'X-Sync-Key': SYNC_API_KEY },
@@ -414,11 +330,11 @@ app.get('/api/ordenes-servicio', async (req, res) => {
   } catch (e) {
     res.status(502).json({ error: 'No se pudo conectar con la Suite: ' + e.message });
   }
-});
+}));
 
-app.get('/api/ordenes-servicio/:id', async (req, res) => {
+app.get('/api/ordenes-servicio/:id', aw(async (req, res) => {
   if (!SUITE_URL) return res.status(500).json({ error: 'SUITE_URL no está configurada en el servidor' });
-  const worker = _osWorkerOrError(req, res); if (!worker) return;
+  const worker = await _osWorkerOrError(req, res); if (!worker) return;
   try {
     const r = await fetch(`${SUITE_URL}/api/ordenes-servicio/externo/${encodeURIComponent(req.params.id)}/detalle?tid=${encodeURIComponent(worker.externalId)}`, {
       headers: { 'X-Sync-Key': SYNC_API_KEY },
@@ -429,11 +345,11 @@ app.get('/api/ordenes-servicio/:id', async (req, res) => {
   } catch (e) {
     res.status(502).json({ error: 'No se pudo conectar con la Suite: ' + e.message });
   }
-});
+}));
 
-app.put('/api/ordenes-servicio/:id', async (req, res) => {
+app.put('/api/ordenes-servicio/:id', aw(async (req, res) => {
   if (!SUITE_URL) return res.status(500).json({ error: 'SUITE_URL no está configurada en el servidor' });
-  const worker = _osWorkerOrError(req, res); if (!worker) return;
+  const worker = await _osWorkerOrError(req, res); if (!worker) return;
   const { alcances, nuevo_punto_abierto, notas_kiosco } = req.body;
   try {
     const r = await fetch(`${SUITE_URL}/api/ordenes-servicio/externo/${encodeURIComponent(req.params.id)}`, {
@@ -447,11 +363,11 @@ app.put('/api/ordenes-servicio/:id', async (req, res) => {
   } catch (e) {
     res.status(502).json({ error: 'No se pudo conectar con la Suite: ' + e.message });
   }
-});
+}));
 
-app.get('/api/ordenes-servicio/:id/pdf', async (req, res) => {
+app.get('/api/ordenes-servicio/:id/pdf', aw(async (req, res) => {
   if (!SUITE_URL) return res.status(500).send('SUITE_URL no está configurada en el servidor');
-  const worker = _osWorkerOrError(req, res); if (!worker) return;
+  const worker = await _osWorkerOrError(req, res); if (!worker) return;
   try {
     const r = await fetch(`${SUITE_URL}/api/ordenes-servicio/externo/${encodeURIComponent(req.params.id)}/pdf?tid=${encodeURIComponent(worker.externalId)}`, {
       headers: { 'X-Sync-Key': SYNC_API_KEY },
@@ -462,12 +378,12 @@ app.get('/api/ordenes-servicio/:id/pdf', async (req, res) => {
   } catch (e) {
     res.status(502).send('No se pudo conectar con la Suite: ' + e.message);
   }
-});
+}));
 
 // ─── TAREAS ASIGNADAS (solo lectura + avance, hacia Persico Suite) ───────────
-app.get('/api/tareas', async (req, res) => {
+app.get('/api/tareas', aw(async (req, res) => {
   if (!SUITE_URL) return res.status(500).json({ error: 'SUITE_URL no está configurada en el servidor' });
-  const worker = _osWorkerOrError(req, res); if (!worker) return;
+  const worker = await _osWorkerOrError(req, res); if (!worker) return;
   try {
     const r = await fetch(`${SUITE_URL}/api/tareas/externo/${encodeURIComponent(worker.externalId)}`, {
       headers: { 'X-Sync-Key': SYNC_API_KEY },
@@ -478,11 +394,11 @@ app.get('/api/tareas', async (req, res) => {
   } catch (e) {
     res.status(502).json({ error: 'No se pudo conectar con la Suite: ' + e.message });
   }
-});
+}));
 
-app.get('/api/tareas/:id', async (req, res) => {
+app.get('/api/tareas/:id', aw(async (req, res) => {
   if (!SUITE_URL) return res.status(500).json({ error: 'SUITE_URL no está configurada en el servidor' });
-  const worker = _osWorkerOrError(req, res); if (!worker) return;
+  const worker = await _osWorkerOrError(req, res); if (!worker) return;
   try {
     const r = await fetch(`${SUITE_URL}/api/tareas/externo/${encodeURIComponent(req.params.id)}/detalle?tid=${encodeURIComponent(worker.externalId)}`, {
       headers: { 'X-Sync-Key': SYNC_API_KEY },
@@ -493,11 +409,11 @@ app.get('/api/tareas/:id', async (req, res) => {
   } catch (e) {
     res.status(502).json({ error: 'No se pudo conectar con la Suite: ' + e.message });
   }
-});
+}));
 
-app.put('/api/tareas/:id', async (req, res) => {
+app.put('/api/tareas/:id', aw(async (req, res) => {
   if (!SUITE_URL) return res.status(500).json({ error: 'SUITE_URL no está configurada en el servidor' });
-  const worker = _osWorkerOrError(req, res); if (!worker) return;
+  const worker = await _osWorkerOrError(req, res); if (!worker) return;
   const { alcances, entregables, nuevo_punto_abierto, notas_kiosco } = req.body;
   try {
     const r = await fetch(`${SUITE_URL}/api/tareas/externo/${encodeURIComponent(req.params.id)}`, {
@@ -511,133 +427,118 @@ app.put('/api/tareas/:id', async (req, res) => {
   } catch (e) {
     res.status(502).json({ error: 'No se pudo conectar con la Suite: ' + e.message });
   }
-});
+}));
 
 // ─── LOCATIONS ───────────────────────────────────────────────────────────────
-app.get('/api/locations', (req, res) => res.json(readJSON(LOCATIONS_FILE)));
-
-app.post('/api/locations', (req, res) => {
-  const locations = readJSON(LOCATIONS_FILE);
-  const location = { id: uuidv4(), radius: 150, ...req.body, createdAt: new Date().toISOString() };
-  locations.push(location);
-  writeJSON(LOCATIONS_FILE, locations);
-  res.json({ success: true, location });
-});
-
-app.put('/api/locations/:id', (req, res) => {
-  const locations = readJSON(LOCATIONS_FILE);
-  const idx = locations.findIndex(l => l.id === req.params.id);
-  if (idx === -1) return res.status(404).json({ error: 'Ubicación no encontrada' });
-  locations[idx] = { ...locations[idx], ...req.body };
-  writeJSON(LOCATIONS_FILE, locations);
-  res.json({ success: true, location: locations[idx] });
-});
-
-app.delete('/api/locations/:id', (req, res) => {
-  let locations = readJSON(LOCATIONS_FILE);
-  locations = locations.filter(l => l.id !== req.params.id);
-  writeJSON(LOCATIONS_FILE, locations);
+const ubicacion = (r) => ({ ...r.data, id: r.id, createdAt: r.data.createdAt || r.created_at });
+app.get('/api/locations', aw(async (req, res) => {
+  const r = await db.q('SELECT * FROM kiosco_ubicaciones ORDER BY created_at');
+  res.json(r.rows.map(ubicacion));
+}));
+app.post('/api/locations', aw(async (req, res) => {
+  const id = uuidv4();
+  const data = { radius: 150, ...req.body, createdAt: new Date().toISOString() };
+  delete data.id;
+  await db.q('INSERT INTO kiosco_ubicaciones (id, data) VALUES ($1, $2)', [id, JSON.stringify(data)]);
+  res.json({ success: true, location: { ...data, id } });
+}));
+app.put('/api/locations/:id', aw(async (req, res) => {
+  const b = { ...req.body }; delete b.id;
+  const r = await db.q('UPDATE kiosco_ubicaciones SET data = data || $2 WHERE id = $1 RETURNING *', [req.params.id, JSON.stringify(b)]);
+  if (!r.rowCount) return res.status(404).json({ error: 'Ubicación no encontrada' });
+  res.json({ success: true, location: ubicacion(r.rows[0]) });
+}));
+app.delete('/api/locations/:id', aw(async (req, res) => {
+  await db.q('DELETE FROM kiosco_ubicaciones WHERE id = $1', [req.params.id]);
   res.json({ success: true });
-});
+}));
 
 // ─── SIGNATURES ──────────────────────────────────────────────────────────────
-// A signature is keyed by: { reportKey, type }
-// reportKey = e.g. "ctrl:2026-W25" or "ctrl:2026-06" — built by the client
-app.get('/api/signatures', (req, res) => {
-  const sigs = readJSON(SIGNATURES_FILE);
+const firma = (r) => ({ ...r.data, id: r.id, reportKey: r.report_key, type: r.tipo });
+app.get('/api/signatures', aw(async (req, res) => {
   const { reportKey } = req.query;
-  const result = reportKey ? sigs.filter(s => s.reportKey === reportKey) : sigs;
-  res.json(result);
-});
-
-app.post('/api/signatures', (req, res) => {
+  const r = reportKey ? await db.q('SELECT * FROM kiosco_firmas WHERE report_key = $1', [reportKey])
+                      : await db.q('SELECT * FROM kiosco_firmas');
+  res.json(r.rows.map(firma));
+}));
+app.post('/api/signatures', aw(async (req, res) => {
   const { reportKey, type, signerName, signerUsername, password } = req.body;
   if (!reportKey || !type || !password) return res.status(400).json({ error: 'Datos incompletos' });
-
-  // Verify password
-  const users = readJSON(USERS_FILE);
-  const user  = users.find(u => u.username === signerUsername && u.password === password);
-  if (!user) return res.status(401).json({ error: 'Contraseña incorrecta' });
-
-  const sigs = readJSON(SIGNATURES_FILE);
-  // Upsert: one signature per reportKey+type
-  const existing = sigs.findIndex(s => s.reportKey === reportKey && s.type === type);
+  const u = (await db.q('SELECT * FROM kiosco_usuarios WHERE username = $1', [String(signerUsername || '')])).rows[0];
+  if (!u || !(await bcrypt.compare(String(password), u.password_hash))) return res.status(401).json({ error: 'Contraseña incorrecta' });
   const sig = { id: uuidv4(), reportKey, type, signerName, signerUsername, signedAt: new Date().toISOString() };
-  if (existing >= 0) sigs[existing] = sig; else sigs.push(sig);
-  writeJSON(SIGNATURES_FILE, sigs);
+  await db.q(`INSERT INTO kiosco_firmas (id, report_key, tipo, data) VALUES ($1,$2,$3,$4)
+              ON CONFLICT (report_key, tipo) DO UPDATE SET id = EXCLUDED.id, data = EXCLUDED.data`,
+             [sig.id, reportKey, type, JSON.stringify({ signerName, signerUsername, signedAt: sig.signedAt })]);
   res.json({ success: true, signature: sig });
-});
-
-app.delete('/api/signatures/:id', (req, res) => {
-  let sigs = readJSON(SIGNATURES_FILE);
-  sigs = sigs.filter(s => s.id !== req.params.id);
-  writeJSON(SIGNATURES_FILE, sigs);
+}));
+app.delete('/api/signatures/:id', aw(async (req, res) => {
+  await db.q('DELETE FROM kiosco_firmas WHERE id = $1', [req.params.id]);
   res.json({ success: true });
-});
+}));
 
 // ─── RECORDS ─────────────────────────────────────────────────────────────────
-app.get('/api/records', (req, res) => {
-  let records = readJSON(RECORDS_FILE);
-  const { workerId, from, to } = req.query;
-  if (workerId) records = records.filter(r => r.workerId === workerId);
-  if (from) records = records.filter(r => r.timestamp >= from);
-  if (to) records = records.filter(r => r.timestamp <= to);
-  res.json(records);
-});
+// timestamp se guarda como texto ISO (UTC), igual que antes, para que los filtros
+// "from/to" funcionen exactamente como funcionaban con los JSON.
+const registro = (r) => ({ ...r.data, id: r.id, workerId: r.worker_tid, workerName: r.worker_name, type: r.tipo, timestamp: r.ts });
+async function buscarRegistros({ workerId, from, to }) {
+  const cond = [], params = [];
+  if (workerId) { params.push(workerId); cond.push(`worker_tid = $${params.length}`); }
+  if (from) { params.push(from); cond.push(`ts >= $${params.length}`); }
+  if (to) { params.push(to); cond.push(`ts <= $${params.length}`); }
+  const r = await db.q(`SELECT * FROM kiosco_registros ${cond.length ? 'WHERE ' + cond.join(' AND ') : ''} ORDER BY ts`, params);
+  return r.rows.map(registro);
+}
+app.get('/api/records', aw(async (req, res) => res.json(await buscarRegistros(req.query))));
 
-app.post('/api/records', (req, res) => {
-  const records = readJSON(RECORDS_FILE);
-  const record = { id: uuidv4(), ...req.body, timestamp: new Date().toISOString() };
-  records.push(record);
-  writeJSON(RECORDS_FILE, records);
-  res.json({ success: true, record });
-});
+app.post('/api/records', aw(async (req, res) => {
+  const b = { ...req.body };
+  const id = uuidv4(), ts = new Date().toISOString();
+  const workerId = String(b.workerId || ''), workerName = b.workerName || '', tipo = b.type || '';
+  delete b.id; delete b.workerId; delete b.workerName; delete b.type; delete b.timestamp;
+  if (!workerId) return res.status(400).json({ error: 'Falta identificar al trabajador' });
+  await db.q('INSERT INTO kiosco_registros (id, worker_tid, worker_name, tipo, ts, data) VALUES ($1,$2,$3,$4,$5,$6)',
+             [id, workerId, workerName, tipo, ts, JSON.stringify(b)]);
+  res.json({ success: true, record: { ...b, id, workerId, workerName, type: tipo, timestamp: ts } });
+}));
 
-// Patch a record (used to add jobHours after salida, or admin edit)
-app.patch('/api/records/:id', (req, res) => {
-  const records = readJSON(RECORDS_FILE);
-  const idx = records.findIndex(r => r.id === req.params.id);
-  if (idx === -1) return res.status(404).json({ error: 'Registro no encontrado' });
-  records[idx] = { ...records[idx], ...req.body };
-  writeJSON(RECORDS_FILE, records);
-  res.json({ success: true, record: records[idx] });
-});
+// Completar un registro (horas por Job al salir) o edición del administrador
+app.patch('/api/records/:id', aw(async (req, res) => {
+  const b = { ...req.body };
+  const sets = ['data = data || $2'], params = [req.params.id];
+  const extra = {};
+  if ('workerId' in b) { extra.worker_tid = b.workerId; }
+  if ('workerName' in b) { extra.worker_name = b.workerName; }
+  if ('type' in b) { extra.tipo = b.type; }
+  if ('timestamp' in b) { extra.ts = b.timestamp; }
+  delete b.id; delete b.workerId; delete b.workerName; delete b.type; delete b.timestamp;
+  params.push(JSON.stringify(b));
+  for (const [col, v] of Object.entries(extra)) { params.push(v); sets.push(`${col} = $${params.length}`); }
+  const r = await db.q(`UPDATE kiosco_registros SET ${sets.join(', ')} WHERE id = $1 RETURNING *`, params);
+  if (!r.rowCount) return res.status(404).json({ error: 'Registro no encontrado' });
+  res.json({ success: true, record: registro(r.rows[0]) });
+}));
 
-// Delete a record (admin only)
-app.delete('/api/records/:id', (req, res) => {
-  let records = readJSON(RECORDS_FILE);
-  const exists = records.find(r => r.id === req.params.id);
-  if (!exists) return res.status(404).json({ error: 'Registro no encontrado' });
-  records = records.filter(r => r.id !== req.params.id);
-  writeJSON(RECORDS_FILE, records);
+app.delete('/api/records/:id', aw(async (req, res) => {
+  const r = await db.q('DELETE FROM kiosco_registros WHERE id = $1', [req.params.id]);
+  if (!r.rowCount) return res.status(404).json({ error: 'Registro no encontrado' });
   res.json({ success: true });
-});
+}));
 
-// Download records as Excel
-app.get('/api/records/export', (req, res) => {
-  let records = readJSON(RECORDS_FILE);
-  const workers = readJSON(WORKERS_FILE);
+app.get('/api/records/export', aw(async (req, res) => {
   const { workerId, from, to, format } = req.query;
-
-  if (workerId) records = records.filter(r => r.workerId === workerId);
-  if (from) records = records.filter(r => r.timestamp >= from);
-  if (to) records = records.filter(r => r.timestamp <= to + 'T23:59:59');
-
+  const records = await buscarRegistros({ workerId, from, to: to ? to + 'T23:59:59' : undefined });
   const workerMap = {};
-  workers.forEach(w => { workerMap[w.id] = w; });
-
+  (await listarTrabajadores()).forEach(w => { workerMap[w.id] = w; });
+  const dayNames = ['Domingo', 'Lunes', 'Martes', 'Miércoles', 'Jueves', 'Viernes', 'Sábado'];
   const rows = records.map(r => {
     const worker = workerMap[r.workerId] || {};
     const dt = new Date(r.timestamp);
-    const dayNames = ['Domingo', 'Lunes', 'Martes', 'Miércoles', 'Jueves', 'Viernes', 'Sábado'];
-    const dayOfWeek = dt.getDay();
-    const dayName = dayNames[dayOfWeek];
-
     return {
       'Nombre': worker.name || r.workerName || '',
       'Puesto': worker.position || '',
       'Fecha': dt.toLocaleDateString('es-MX'),
-      'Día': dayName,
+      'Día': dayNames[dt.getDay()],
       'Hora': dt.toLocaleTimeString('es-MX'),
       'Tipo': r.type === 'entrada' ? 'Entrada' : 'Salida',
       'Horas Jornada': r.totalHours || '',
@@ -649,16 +550,14 @@ app.get('/api/records/export', (req, res) => {
       'Dentro de Geocerca': r.inGeofence ? 'Sí' : 'No'
     };
   });
-
   if (format === 'csv') {
     if (rows.length === 0) return res.send('Sin registros');
     const headers = Object.keys(rows[0]);
-    const csv = [headers.join(','), ...rows.map(r => headers.map(h => `"${r[h]}"`).join(','))].join('\n');
+    const csv = [headers.join(','), ...rows.map(r => headers.map(h => `"${String(r[h]).replace(/"/g, '""')}"`).join(','))].join('\n');
     res.setHeader('Content-Disposition', 'attachment; filename="registros_persico.csv"');
     res.setHeader('Content-Type', 'text/csv; charset=utf-8');
     return res.send('\uFEFF' + csv);
   }
-
   const wb = XLSX.utils.book_new();
   const ws = XLSX.utils.json_to_sheet(rows);
   ws['!cols'] = Object.keys(rows[0] || {}).map(() => ({ wch: 18 }));
@@ -667,9 +566,86 @@ app.get('/api/records/export', (req, res) => {
   res.setHeader('Content-Disposition', 'attachment; filename="registros_persico.xlsx"');
   res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
   res.send(buffer);
-});
+}));
+
+// Estado de la conexión (para soporte)
+app.get('/api/estado', aw(async (req, res) => {
+  const n = async (t) => (await db.q(`SELECT count(*)::int AS n FROM ${t}`)).rows[0].n;
+  res.json({ ok: true, base_de_datos: 'PostgreSQL (compartida con Persico Suite)', trabajadores: await n('personal'),
+             registros: await n('kiosco_registros'), ubicaciones: await n('kiosco_ubicaciones'),
+             migracion_json: await db.getConfig('migracion_json', null), suite_url: !!SUITE_URL, sync_key: !!SYNC_API_KEY });
+}));
 
 // Fallback
 app.get('*', (req, res) => res.sendFile(path.join(__dirname, 'public', 'index.html')));
 
-app.listen(PORT, () => console.log(`Persico Attendance running on port ${PORT}`));
+// ─── ARRANQUE: tablas, usuarios por defecto y migración única de los JSON antiguos ───
+const leer = (f) => { try { const t = fs.readFileSync(path.join(DATA_DIR, f), 'utf8').trim(); return t ? JSON.parse(t) : []; } catch (e) { return []; } };
+
+async function migrarJSON() {
+  if (await db.getConfig('migracion_json', null)) return;               // ya se hizo una vez
+  const users = leer('users.json'), workers = leer('workers.json'), locations = leer('locations.json');
+  const records = leer('records.json'), sigs = leer('signatures.json'), notif = leer('notifications.json');
+  const res = { usuarios: 0, ubicaciones: 0, trabajadores_cfg: 0, registros: 0, registros_sin_vincular: 0, firmas: 0, fecha: new Date().toISOString() };
+  await db.tx(async (c) => {
+    for (const u of users) {
+      if (!u.username || !u.password) continue;
+      const r = await c.query('INSERT INTO kiosco_usuarios (id, username, password_hash, role, name) VALUES ($1,$2,$3,$4,$5) ON CONFLICT DO NOTHING',
+        [u.id || uuidv4(), u.username, await bcrypt.hash(String(u.password), 10), u.role || 'worker', u.name || u.username]);
+      res.usuarios += r.rowCount;
+    }
+    for (const l of locations) {
+      const { id, ...data } = l;
+      const r = await c.query('INSERT INTO kiosco_ubicaciones (id, data) VALUES ($1,$2) ON CONFLICT DO NOTHING', [id || uuidv4(), JSON.stringify(data)]);
+      res.ubicaciones += r.rowCount;
+    }
+    // Trabajadores del JSON → su configuración, ligada por externalId (tid de la Suite)
+    const tidDe = {};
+    const tidsSuite = new Set((await c.query('SELECT tid FROM personal')).rows.map(r => r.tid));
+    for (const w of workers) {
+      if (w.externalId && tidsSuite.has(w.externalId)) {
+        tidDe[w.id] = w.externalId;
+        const cfg = { shiftStart: w.shiftStart, shiftEnd: w.shiftEnd, allowedJobs: w.allowedJobs || [],
+                      locationIds: w.locationIds || (w.locationId ? [w.locationId] : []) };
+        await c.query(`INSERT INTO kiosco_trabajadores (tid, pin_hash, data) VALUES ($1,$2,$3) ON CONFLICT (tid) DO NOTHING`,
+          [w.externalId, w.pin ? hashPin(w.pin) : null, JSON.stringify(cfg)]).catch(() => null);
+        res.trabajadores_cfg++;
+      }
+    }
+    const nombreDe = Object.fromEntries(workers.map(w => [w.id, w.name]));
+    for (const r0 of records) {
+      const { id, workerId, workerName, type, timestamp, ...data } = r0;
+      let tid = tidDe[workerId];
+      if (!tid) { tid = 'KIOSCO-' + workerId; res.registros_sin_vincular++; }        // se puede vincular desde la Suite
+      const r = await c.query('INSERT INTO kiosco_registros (id, worker_tid, worker_name, tipo, ts, data) VALUES ($1,$2,$3,$4,$5,$6) ON CONFLICT DO NOTHING',
+        [id || uuidv4(), tid, workerName || nombreDe[workerId] || '', type || '', timestamp || new Date().toISOString(), JSON.stringify(data)]);
+      res.registros += r.rowCount;
+    }
+    for (const s of sigs) {
+      if (!s.reportKey || !s.type) continue;
+      const r = await c.query('INSERT INTO kiosco_firmas (id, report_key, tipo, data) VALUES ($1,$2,$3,$4) ON CONFLICT DO NOTHING',
+        [s.id || uuidv4(), s.reportKey, s.type, JSON.stringify({ signerName: s.signerName, signerUsername: s.signerUsername, signedAt: s.signedAt })]);
+      res.firmas += r.rowCount;
+    }
+    if (Array.isArray(notif) && notif.length) await c.query(`INSERT INTO kiosco_config (clave, data) VALUES ('notificaciones', $1) ON CONFLICT DO NOTHING`, [JSON.stringify(notif)]);
+    await c.query(`INSERT INTO kiosco_config (clave, data) VALUES ('migracion_json', $1) ON CONFLICT (clave) DO UPDATE SET data = EXCLUDED.data`, [JSON.stringify(res)]);
+  });
+  console.log('[kiosco] Migración de JSON a la base de datos:', res);
+}
+
+async function arrancar() {
+  await db.init();
+  await db.q('SELECT 1 FROM personal LIMIT 1').catch(() => { throw new Error('No existe la tabla "personal": DATABASE_URL debe apuntar a la base de datos de Persico Suite.'); });
+  await migrarJSON();
+  const n = (await db.q('SELECT count(*)::int AS n FROM kiosco_usuarios')).rows[0].n;
+  if (!n) {
+    await db.q('INSERT INTO kiosco_usuarios (id, username, password_hash, role, name) VALUES ($1,$2,$3,$4,$5),($6,$7,$8,$9,$10)',
+      ['1', 'admin', await bcrypt.hash('admin123', 10), 'admin', 'Administrador', '2', 'rrhh', await bcrypt.hash('rrhh123', 10), 'rrhh', 'Recursos Humanos']);
+    console.log('[kiosco] Usuarios por defecto creados (admin / rrhh). Cambia sus contraseñas.');
+  }
+  // Marca para la Suite: el kiosco ya trabaja sobre la base compartida
+  await db.setConfig('kiosco_bd', { version: 2, arranque: new Date().toISOString() });
+  app.listen(PORT, () => console.log(`Persico Attendance (PostgreSQL compartida) running on port ${PORT}`));
+}
+
+arrancar().catch(e => { console.error('[kiosco] No se pudo arrancar:', e.message); process.exit(1); });

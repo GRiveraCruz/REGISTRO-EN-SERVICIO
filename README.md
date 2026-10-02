@@ -90,20 +90,20 @@ Columnas: `Nombre`, `Puesto`, `Jornada`, `Ubicacion`
 
 ---
 
-## ⚙️ Variables de entorno (opcionales)
+## ⚙️ Variables de entorno
 
-| Variable | Default | Descripción |
-|----------|---------|-------------|
-| `PORT`   | `3000`  | Puerto del servidor |
+| Variable | Requerida | Descripción |
+|----------|-----------|-------------|
+| `DATABASE_URL` | **Sí** | La **misma** base PostgreSQL de Persico Suite (en Railway: referencia `${{Postgres.DATABASE_URL}}`). |
+| `SUITE_URL` | Sí | URL de Persico Suite (permisos, vacaciones, órdenes de servicio, tareas). |
+| `SYNC_API_KEY` | Sí | Llave compartida con la Suite (`ATTENDANCE_SYNC_KEY` allá). |
+| `KIOSCO_PIN_SECRET` | Recomendada | Secreto para guardar los PIN cifrados (si se cambia, los PIN existentes dejan de servir). |
+| `PORT` | No | Puerto (3000). |
 
----
+## 🗄 Datos (v2)
 
-## 🔒 Notas de seguridad
-
-- Los datos se almacenan en archivos JSON locales. Para producción prolongada, considera migrar a una base de datos (PostgreSQL addon de Railway).
-- En Railway, los archivos en `/data` persisten entre deploys si usas un **Volume** (recomendado).
-
-### Agregar Volume en Railway
-1. En tu proyecto → **New** → **Volume**
-2. Monta en `/app/data`
-3. Los registros persistirán aunque se redeploy el servicio.
+- Ya **no se usan archivos JSON**: todo vive en la base de datos de la Suite.
+- **Trabajadores** = tabla `personal` de la Suite (Control de Personal). Ya no hay sincronización ni alta de trabajadores en el kiosco.
+- Tablas propias del kiosco: `kiosco_registros`, `kiosco_trabajadores` (PIN, jornada, puntos de registro, jobs permitidos), `kiosco_ubicaciones`, `kiosco_usuarios`, `kiosco_firmas`, `kiosco_config`. Se crean solas al arrancar.
+- **Migración automática**: en el primer arranque con base de datos, si existen los JSON anteriores en `data/`, se copian una sola vez (usuarios con contraseña cifrada, ubicaciones, configuración de trabajadores ligada por `externalId`, registros, firmas y notificaciones). Los registros de trabajadores que no estaban vinculados quedan como `KIOSCO-<id>` y se vinculan desde la Suite (Asistencia → vincular).
+- `GET /api/estado` muestra el estado de la conexión y el resultado de la migración.
