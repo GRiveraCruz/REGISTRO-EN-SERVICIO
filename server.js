@@ -21,7 +21,7 @@ const db = require('./db');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
-const SYNC_API_KEY = process.env.SYNC_API_KEY || '';
+const SYNC_API_KEY = (process.env.SYNC_API_KEY || '').trim().replace(/^["']|["']$/g, '').trim();   // sin espacios/comillas pegados
 // Se acepta con o sin protocolo: "beta-persico.up.railway.app" → "https://beta-persico.up.railway.app"
 const SUITE_URL = (() => {
   let u = (process.env.SUITE_URL || '').trim().replace(/\/+$/, '');
@@ -194,6 +194,84 @@ app.delete('/api/workers/:id/pin', aw(async (req, res) => {
   const r = await db.q('UPDATE kiosco_trabajadores SET pin_hash = NULL, updated_at = now() WHERE tid = $1', [req.params.id]);
   if (!r.rowCount && !(await trabajadorPorId(req.params.id))) return res.status(404).json({ error: 'Trabajador no encontrado' });
   res.json({ success: true });
+}));
+
+// ─── CARDEX del trabajador (pantalla de inicio) ──────────────────────────────
+// Datos de Control de Personal (puesto, fecha de ingreso, antigüedad), horario del
+// Tipo de Puesto de su perfil (Suite) —o la jornada configurada en el kiosco—, saldo
+// de vacaciones (Suite), horas de esta semana y de la anterior (registros del kiosco,
+// semana lunes–domingo en hora de México) y ubicaciones permitidas.
+const TZ_LOCAL = process.env.KIOSCO_TZ || 'America/Mexico_City';
+const DIAS_CORTOS = ['Lun', 'Mar', 'Mié', 'Jue', 'Vie', 'Sáb', 'Dom'];
+function aniosMeses(fecha) {
+  if (!fecha) return null;
+  const d = new Date(String(fecha).slice(0, 10) + 'T12:00:00'); if (isNaN(d)) return null;
+  const h = new Date();
+  let m = (h.getFullYear() - d.getFullYear()) * 12 + (h.getMonth() - d.getMonth());
+  if (h.getDate() < d.getDate()) m--;
+  m = Math.max(0, m);
+  return { anios: Math.floor(m / 12), meses: m % 12 };
+}
+app.get('/api/workers/:id/cardex', aw(async (req, res) => {
+  const tid = String(req.params.id || '');
+  const p = (await db.q('SELECT tid, nombre, area, data FROM personal WHERE tid = $1', [tid])).rows[0];
+  if (!p) return res.status(404).json({ error: 'Trabajador no encontrado' });
+  const d = p.data || {};
+  const w = await trabajadorPorId(tid);
+  // Horario: Tipo de Puesto del perfil (Suite) → jornada del kiosco
+  let horario = null;
+  try {
+    const t = (await db.q(`SELECT tp.data FROM perfiles pf JOIN tipos_puesto tp ON tp.tpid = pf.data->>'tipo_puesto'
+                           WHERE lower(pf.data->>'nombre') = lower($1) LIMIT 1`, [d.puesto || ''])).rows[0];
+    if (t && t.data && t.data.jornada) {
+      const j = t.data.jornada, dias = [];
+      for (let i = 0; i < 7; i++) { const x = j[String(i)] || {}; if (x.entrada) dias.push({ dia: DIAS_CORTOS[i], entrada: x.entrada, salida: x.salida }); }
+      // agrupa días consecutivos con el mismo horario: "Lun–Jue 07:00–17:00 · Vie 07:00–15:00"
+      const grupos = [];
+      for (const x of dias) {
+        const g = grupos[grupos.length - 1];
+        if (g && g.entrada === x.entrada && g.salida === x.salida && DIAS_CORTOS.indexOf(x.dia) === DIAS_CORTOS.indexOf(g.hasta) + 1) g.hasta = x.dia;
+        else grupos.push({ desde: x.dia, hasta: x.dia, entrada: x.entrada, salida: x.salida });
+      }
+      horario = { tipo: t.data.nombre, texto: grupos.map(g => `${g.desde}${g.hasta !== g.desde ? '–' + g.hasta : ''} ${g.entrada}–${g.salida}`).join(' · ') };
+    }
+  } catch (e) { /* la Suite aún no tiene tipos de puesto: se usa la jornada del kiosco */ }
+  if (!horario && w) horario = { tipo: null, texto: `${w.shiftStart} – ${w.shiftEnd}` };
+  // Horas por semana (lunes–domingo, hora local) a partir de las salidas registradas
+  const h = (await db.q(`
+    WITH r AS (SELECT (ts::timestamptz AT TIME ZONE $2) AS loc, (data->>'totalHours')::numeric AS horas
+               FROM kiosco_registros WHERE worker_tid = $1 AND tipo = 'salida' AND ts >= $3)
+    SELECT to_char(date_trunc('week', loc), 'YYYY-MM-DD') AS semana, COALESCE(sum(horas), 0)::float AS horas, count(*)::int AS jornadas
+    FROM r GROUP BY 1`, [tid, TZ_LOCAL, new Date(Date.now() - 16 * 86400000).toISOString()])).rows;
+  // (como texto: pg convierte DATE a objeto Date con zona del servidor y el día puede recorrerse)
+  const lunes = (await db.q(`SELECT to_char(date_trunc('week', now() AT TIME ZONE $1), 'YYYY-MM-DD') AS esta,
+                                    to_char(date_trunc('week', now() AT TIME ZONE $1) - interval '7 days', 'YYYY-MM-DD') AS pasada`, [TZ_LOCAL])).rows[0];
+  const semana = (f) => { const x = h.find(r => String(r.semana) === String(f)); return { horas: x ? Math.round(x.horas * 100) / 100 : 0, jornadas: x ? x.jornadas : 0 }; };
+  const iso = (v) => String(v).slice(0, 10);
+  // Jornada en curso (entrada sin salida): horas transcurridas, solo informativo
+  const ult = (await db.q('SELECT tipo, ts FROM kiosco_registros WHERE worker_tid = $1 ORDER BY ts DESC LIMIT 1', [tid])).rows[0];
+  const enCurso = ult && ult.tipo === 'entrada' ? Math.round(Math.max(0, (Date.now() - Date.parse(ult.ts)) / 36e5) * 100) / 100 : null;
+  // Ubicaciones permitidas
+  const locs = (await db.q('SELECT id, data FROM kiosco_ubicaciones ORDER BY created_at')).rows;
+  const ids = (w && w.locationIds) || [];
+  const ubicaciones = (ids.length ? locs.filter(l => ids.includes(l.id)) : locs).map(l => l.data.name || l.id);
+  // Vacaciones (Suite)
+  let vacaciones = null;
+  if (SUITE_URL) {
+    try {
+      const r = await fetch(`${SUITE_URL}/api/vacaciones/externo/${encodeURIComponent(tid)}`, { headers: { 'X-Sync-Key': SYNC_API_KEY } });
+      const v = await r.json();
+      vacaciones = r.ok ? { saldo: v.saldo, ganados: v.ganados, gozados: v.gozados, pendientes: v.pendientes } : { error: v.error || 'No disponible' };
+    } catch (e) { vacaciones = { error: 'Sin conexión con Recursos Humanos' }; }
+  }
+  res.json({
+    tid, nombre: p.nombre || d.nombre, puesto: d.puesto || '', area: p.area || d.area || '',
+    fecha_ingreso: d.fecha_ingreso || null, antiguedad: aniosMeses(d.fecha_ingreso),
+    horario, vacaciones,
+    semana_actual: { desde: iso(lunes.esta), ...semana(iso(lunes.esta)), en_curso: enCurso },
+    semana_pasada: { desde: iso(lunes.pasada), ...semana(iso(lunes.pasada)) },
+    ubicaciones, todas_las_ubicaciones: !ids.length,
+  });
 }));
 
 // ─── VACACIONES (saldo, desde la Suite) ──────────────────────────────────────
@@ -496,15 +574,41 @@ async function buscarRegistros({ workerId, from, to }) {
 }
 app.get('/api/records', aw(async (req, res) => res.json(await buscarRegistros(req.query))));
 
+// v2.3: entre un registro y el siguiente del mismo trabajador deben pasar al menos
+// KIOSCO_ESPERA_MIN minutos (5 por defecto), y se alterna Entrada / Salida. Se valida
+// aquí también —no solo en la pantalla— y con un candado por trabajador, para que dos
+// toques seguidos (o dos dispositivos) no generen dos registros.
+const ESPERA_MIN = Math.max(0, parseFloat(process.env.KIOSCO_ESPERA_MIN || '5') || 0);
+app.get('/api/config/registro', (req, res) => res.json({ espera_minutos: ESPERA_MIN }));
+
 app.post('/api/records', aw(async (req, res) => {
   const b = { ...req.body };
   const id = uuidv4(), ts = new Date().toISOString();
   const workerId = String(b.workerId || ''), workerName = b.workerName || '', tipo = b.type || '';
   delete b.id; delete b.workerId; delete b.workerName; delete b.type; delete b.timestamp;
   if (!workerId) return res.status(400).json({ error: 'Falta identificar al trabajador' });
-  await db.q('INSERT INTO kiosco_registros (id, worker_tid, worker_name, tipo, ts, data) VALUES ($1,$2,$3,$4,$5,$6)',
-             [id, workerId, workerName, tipo, ts, JSON.stringify(b)]);
-  res.json({ success: true, record: { ...b, id, workerId, workerName, type: tipo, timestamp: ts } });
+  if (!['entrada', 'salida'].includes(tipo)) return res.status(400).json({ error: 'Tipo de registro inválido' });
+  const resultado = await db.tx(async (c) => {
+    await c.query('SELECT pg_advisory_xact_lock(hashtext($1))', ['kiosco-registro:' + workerId]);
+    const ult = (await c.query('SELECT tipo, ts FROM kiosco_registros WHERE worker_tid = $1 ORDER BY ts DESC LIMIT 1', [workerId])).rows[0];
+    if (ult) {
+      const transcurrido = (Date.parse(ts) - Date.parse(ult.ts)) / 1000;
+      const espera = ESPERA_MIN * 60;
+      if (transcurrido >= 0 && transcurrido < espera) {
+        const faltan = Math.ceil(espera - transcurrido);
+        return { status: 429, body: { error: `Debes esperar ${Math.floor(faltan / 60)}:${String(faltan % 60).padStart(2, '0')} min para tu siguiente registro.`,
+                                      segundos_restantes: faltan, ultimo: { type: ult.tipo, timestamp: ult.ts } } };
+      }
+      if (ult.tipo === tipo) {
+        return { status: 409, body: { error: `Tu último registro ya fue ${tipo === 'entrada' ? 'Entrada' : 'Salida'}; ahora corresponde ${tipo === 'entrada' ? 'Salida' : 'Entrada'}.`,
+                                      ultimo: { type: ult.tipo, timestamp: ult.ts } } };
+      }
+    }
+    await c.query('INSERT INTO kiosco_registros (id, worker_tid, worker_name, tipo, ts, data) VALUES ($1,$2,$3,$4,$5,$6)',
+                  [id, workerId, workerName, tipo, ts, JSON.stringify(b)]);
+    return { status: 200, body: { success: true, record: { ...b, id, workerId, workerName, type: tipo, timestamp: ts } } };
+  });
+  res.status(resultado.status).json(resultado.body);
 }));
 
 // Completar un registro (horas por Job al salir) o edición del administrador
@@ -576,7 +680,16 @@ app.get('/api/records/export', aw(async (req, res) => {
 // Estado de la conexión (para soporte)
 app.get('/api/estado', aw(async (req, res) => {
   const n = async (t) => (await db.q(`SELECT count(*)::int AS n FROM ${t}`)).rows[0].n;
-  res.json({ ok: true, base_de_datos: 'PostgreSQL (compartida con Persico Suite)', trabajadores: await n('personal'),
+  // Prueba real de la conexión con la Suite (URL + llave), sin mostrar la llave
+  let suite = { ok: false, error: 'SUITE_URL no configurada' };
+  if (SUITE_URL) {
+    try {
+      const r = await fetch(`${SUITE_URL}/api/kiosco/ping`, { headers: { 'X-Sync-Key': SYNC_API_KEY } });
+      const t = await r.text();
+      try { suite = JSON.parse(t); } catch (e) { suite = { ok: false, error: `La Suite respondió ${r.status} sin JSON (¿versión anterior a rev81 o URL equivocada?)` }; }
+    } catch (e) { suite = { ok: false, error: 'No se pudo conectar: ' + e.message }; }
+  }
+  res.json({ ok: true, base_de_datos: 'PostgreSQL (compartida con Persico Suite)', conexion_suite: suite, largo_sync_key: SYNC_API_KEY.length, trabajadores: await n('personal'),
              registros: await n('kiosco_registros'), ubicaciones: await n('kiosco_ubicaciones'),
              migracion_json: await db.getConfig('migracion_json', null), suite_url: SUITE_URL || null, sync_key: !!SYNC_API_KEY });
 }));

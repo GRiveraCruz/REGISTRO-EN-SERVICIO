@@ -220,6 +220,14 @@
     .attendance-hero .date-str { font-size: 13px; opacity: .7; margin-top: 6px; }
     .attendance-hero .worker-name { font-size: clamp(16px, 4vw, 22px); font-weight: 700; margin: 16px 0 4px; }
     .attendance-hero .worker-pos { font-size: 12px; opacity: .6; }
+    /* v2.4: cardex del trabajador dentro de la tarjeta del reloj */
+    .cardex { margin-top: 18px; padding-top: 16px; border-top: 1px solid rgba(255,255,255,.12); text-align: left;
+              display: grid; grid-template-columns: repeat(auto-fit, minmax(230px, 1fr)); gap: 10px 22px; }
+    .cardex-item { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+    .cardex-lbl { font-size: 10.5px; letter-spacing: 1px; text-transform: uppercase; opacity: .55; }
+    .cardex-val { font-size: 15px; font-weight: 700; word-break: break-word; }
+    .cardex-sub { font-size: 11px; opacity: .6; font-weight: 400; }
+    .cardex-cargando { grid-column: 1 / -1; text-align: center; font-size: 12px; opacity: .6; }
 
     .geo-wrap { text-align: center; margin-bottom: 20px; }
     .geo-status {
@@ -453,19 +461,24 @@
       <div class="sub">Control de Asistencia en Campo</div>
     </div>
     <div id="loginAlert"></div>
-    <div class="form-group">
-      <label>Usuario</label>
-      <input id="loginUser" type="text" placeholder="Ingrese su usuario" autocomplete="username" />
+    <!-- v2.4: la entrada principal es la del trabajador; el acceso de administrador queda en un enlace -->
+    <div id="loginWorkerBox">
+      <button class="btn btn-primary btn-full" style="padding:18px;font-size:17px" onclick="showWorkerLogin()">👷 Entrar como trabajador</button>
+      <p style="text-align:center;font-size:12px;color:var(--ink-soft);margin-top:10px;">Registra tu entrada o salida, consulta tus permisos y tareas.</p>
+      <p style="text-align:center;margin-top:22px;"><a href="#" onclick="mostrarLoginAdmin(true);return false" style="font-size:13px;color:var(--ink-soft);text-decoration:underline">Ingresar como administrador</a></p>
     </div>
-    <div class="form-group">
-      <label>Contraseña</label>
-      <input id="loginPass" type="password" placeholder="••••••••" autocomplete="current-password" />
+    <div id="loginAdminBox" style="display:none">
+      <div class="form-group">
+        <label>Usuario</label>
+        <input id="loginUser" type="text" placeholder="Ingrese su usuario" autocomplete="username" onkeydown="if(event.key==='Enter')document.getElementById('loginPass').focus()" />
+      </div>
+      <div class="form-group">
+        <label>Contraseña</label>
+        <input id="loginPass" type="password" placeholder="••••••••" autocomplete="current-password" onkeydown="if(event.key==='Enter')doLogin()" />
+      </div>
+      <button class="btn btn-primary btn-full" onclick="doLogin()">Ingresar →</button>
+      <p style="text-align:center;margin-top:18px;"><a href="#" onclick="mostrarLoginAdmin(false);return false" style="font-size:13px;color:var(--ink-soft);text-decoration:underline">← Volver al acceso de trabajador</a></p>
     </div>
-    <button class="btn btn-primary btn-full" onclick="doLogin()">Ingresar →</button>
-    <p style="text-align:center;font-size:12px;color:var(--ink-soft);margin-top:20px;">
-      Usuario general: seleccione <strong>Acceso de Trabajador</strong> abajo
-    </p>
-    <button class="btn btn-secondary btn-full" style="margin-top:8px;" onclick="showWorkerLogin()">👷 Acceso de Trabajador</button>
   </div>
 </div>
 
@@ -655,12 +668,6 @@
     <!-- PANEL: Registro (trabajador) -->
     <div class="panel" id="panel-registro">
       <div id="homeNotifications" style="display:flex;flex-direction:column;gap:8px;margin-bottom:16px"></div>
-      <div class="attendance-hero">
-        <div class="clock" id="clockDisplay">00:00:00</div>
-        <div class="date-str" id="dateDisplay">—</div>
-        <div class="worker-name" id="heroWorkerName">—</div>
-        <div class="worker-pos" id="heroWorkerPos"></div>
-      </div>
       <div class="geo-wrap">
         <div class="geo-status geo-checking" id="geoStatus">
           <span>📡</span> Verificando ubicación…
@@ -683,6 +690,14 @@
         </button>
       </div>
       <div id="lastRecordHint" style="text-align:center;font-size:12px;color:var(--ink-soft);margin-top:8px"></div>
+      <!-- v2.4: reloj + cardex del trabajador -->
+      <div class="attendance-hero" style="margin-top:18px">
+        <div class="clock" id="clockDisplay">00:00:00</div>
+        <div class="date-str" id="dateDisplay">—</div>
+        <div class="worker-name" id="heroWorkerName">—</div>
+        <div class="worker-pos" id="heroWorkerPos"></div>
+        <div class="cardex" id="cardexBox"><div class="cardex-cargando">Cargando tu información…</div></div>
+      </div>
       <div style="margin-top:20px;">
         <div class="card">
           <div class="card-title">📋 Mis últimos registros</div>
@@ -2019,13 +2034,22 @@ function showLoginAlert(msg, type) {
   setTimeout(() => el.innerHTML = '', 4000);
 }
 
+function mostrarLoginAdmin(si){
+  document.getElementById('loginWorkerBox').style.display = si ? 'none' : '';
+  document.getElementById('loginAdminBox').style.display = si ? '' : 'none';
+  document.getElementById('loginAlert').innerHTML = '';
+  if (si) setTimeout(() => document.getElementById('loginUser').focus(), 50);
+}
+
 function logout() {
   currentUser = null;
+  _registroSesion = null; detenerEspera();             // v2.3: la siguiente sesión empieza sin registro
   stopClock(); stopGeo();
   document.getElementById('app').style.display = 'none';
   document.getElementById('loginScreen').style.display = 'flex';
   document.getElementById('loginUser').value = '';
   document.getElementById('loginPass').value = '';
+  mostrarLoginAdmin(false);                                // v2.4: siempre vuelve al acceso de trabajador
 }
 
 // ══════════════════════════════════════════════════════════════
@@ -2051,6 +2075,8 @@ async function startApp() {
   if (fTo   && !fTo.value)   fTo.value   = today;
 
   if (currentUser.role === 'worker') {
+    _registroSesion = null; detenerEspera();
+    try { ESPERA_MIN = (await (await fetch('/api/config/registro')).json()).espera_minutos ?? 5; } catch (e) {}
     // Pre-load this worker's records so entrada lookup works for job hours modal
     const r = await fetch(`/api/records?workerId=${currentUser.id}`);
     records = await r.json();
@@ -2060,7 +2086,8 @@ async function startApp() {
     loadMyRecords();
     loadHomeNotifications();
     document.getElementById('heroWorkerName').textContent = currentUser.name;
-    document.getElementById('heroWorkerPos').textContent = currentUser.position || '';
+    document.getElementById('heroWorkerPos').textContent = '';   // puesto y área van en el cardex
+    cargarCardex();
     populateWorkerLocationSelect();
     maybePromptSetPin();
   } else {
@@ -2174,6 +2201,37 @@ function checkGeo() {
   }, { enableHighAccuracy: true, timeout: 15000 });
 }
 
+// v2.4 — Cardex general del trabajador en la pantalla de inicio
+async function cargarCardex(){
+  const box = document.getElementById('cardexBox'); if (!box || !currentUser) return;
+  box.innerHTML = '<div class="cardex-cargando">Cargando tu información…</div>';
+  try {
+    const r = await fetch(`/api/workers/${encodeURIComponent(currentUser.id)}/cardex`);
+    const c = await r.json();
+    if (!r.ok) { box.innerHTML = `<div class="cardex-cargando">${c.error || 'No se pudo cargar tu información'}</div>`; return; }
+    const fecha = v => v ? new Date(String(v).slice(0,10)+'T12:00:00').toLocaleDateString('es-MX',{day:'2-digit',month:'long',year:'numeric'}) : '—';
+    const corta = v => new Date(v+'T12:00:00').toLocaleDateString('es-MX',{day:'2-digit',month:'short'});
+    const fin = v => { const d = new Date(v+'T12:00:00'); d.setDate(d.getDate()+6); return d.toLocaleDateString('es-MX',{day:'2-digit',month:'short'}); };
+    const h = n => `${Number(n||0).toLocaleString('es-MX',{maximumFractionDigits:2})} h`;
+    const a = c.antiguedad;
+    const antig = !a ? '—' : (a.anios ? `${a.anios} año${a.anios===1?'':'s'}` : '') + (a.anios && a.meses ? ', ' : '') + (a.meses || !a.anios ? `${a.meses} mes${a.meses===1?'':'es'}` : '');
+    const v = c.vacaciones;
+    const vac = !v ? '—' : v.error ? `<span class="cardex-sub">${v.error}</span>` : `${v.saldo} día${v.saldo===1?'':'s'}`;
+    const vacSub = v && !v.error ? `Ganados ${v.ganados} · gozados ${v.gozados}${v.pendientes ? ` · ${v.pendientes} por aprobar` : ''}` : '';
+    const sa = c.semana_actual, sp = c.semana_pasada;
+    const item = (lbl, val, sub='') => `<div class="cardex-item"><span class="cardex-lbl">${lbl}</span><span class="cardex-val">${val}</span>${sub?`<span class="cardex-sub">${sub}</span>`:''}</div>`;
+    box.innerHTML =
+      item('Puesto actual', c.puesto || '—', c.area || '') +
+      item('Fecha de ingreso', fecha(c.fecha_ingreso)) +
+      item('Horario', c.horario ? c.horario.texto : '—', c.horario && c.horario.tipo ? c.horario.tipo : '') +
+      item('Antigüedad', antig) +
+      item('Días de vacaciones disponibles', vac, vacSub) +
+      item('Total de horas esta semana', h(sa.horas), `${corta(sa.desde)} – ${fin(sa.desde)} · ${sa.jornadas} jornada${sa.jornadas===1?'':'s'}${sa.en_curso!=null?` · en curso: ${h(sa.en_curso)}`:''}`) +
+      item('Total de horas semana pasada', h(sp.horas), `${corta(sp.desde)} – ${fin(sp.desde)} · ${sp.jornadas} jornada${sp.jornadas===1?'':'s'}`) +
+      item('Ubicaciones permitidas', c.ubicaciones.length ? c.ubicaciones.join(', ') : '—', c.todas_las_ubicaciones && c.ubicaciones.length ? 'Todas (sin restricción asignada)' : '');
+  } catch (e) { box.innerHTML = `<div class="cardex-cargando">Error de conexión: ${e.message}</div>`; }
+}
+
 function populateWorkerLocationSelect() {
   const sel = document.getElementById('workerLocationSelect');
   const locDiv = document.getElementById('locationSelector');
@@ -2244,10 +2302,31 @@ function haversine(lat1, lng1, lat2, lng2) {
   return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a));
 }
 
-function getLastRecordType(){
+function getLastRecord(){
   const mine = records.filter(r => r.workerId === currentUser.id)
     .sort((a,b) => new Date(b.timestamp) - new Date(a.timestamp));
-  return mine.length ? mine[0].type : null;
+  return mine[0] || null;
+}
+function getLastRecordType(){ const r = getLastRecord(); return r ? r.type : null; }
+
+// v2.3 — Un solo registro por sesión y espera mínima entre registros
+let ESPERA_MIN = 5;                 // se lee del servidor (KIOSCO_ESPERA_MIN) al iniciar
+let _registroSesion = null;         // tipo registrado en la sesión actual del trabajador
+let _esperaTimer = null;
+const _fmtHora = d => d.toLocaleTimeString('es-MX', { hour: '2-digit', minute: '2-digit' });
+function msParaSiguiente(){
+  const r = getLastRecord(); if (!r) return 0;
+  return Math.max(0, new Date(r.timestamp).getTime() + ESPERA_MIN * 60000 - Date.now());
+}
+function detenerEspera(){ if (_esperaTimer) { clearInterval(_esperaTimer); _esperaTimer = null; } }
+function iniciarEspera(){
+  if (_esperaTimer) return;
+  _esperaTimer = setInterval(() => {
+    if (!currentUser) return detenerEspera();
+    if (_registroSesion) { enableActionBtns(); return; }
+    if (msParaSiguiente() <= 0) { detenerEspera(); checkGeofence(); }   // ya puede: vuelve a evaluar ubicación
+    else enableActionBtns();
+  }, 1000);
 }
 
 function enableActionBtns() {
@@ -2255,6 +2334,23 @@ function enableActionBtns() {
   const btnE = document.getElementById('btnEntrada');
   const btnS = document.getElementById('btnSalida');
   const hint = document.getElementById('lastRecordHint');
+  // Ya registró en esta sesión: no puede marcar el otro movimiento sin cerrar sesión
+  if (_registroSesion) {
+    btnE.disabled = true; btnS.disabled = true;
+    const ms = msParaSiguiente();
+    if (hint) hint.innerHTML = `✅ Ya registraste tu <b>${_registroSesion === 'entrada' ? 'Entrada' : 'Salida'}</b> en esta sesión. `
+      + `Para el siguiente registro cierra sesión y vuelve a entrar${ms > 0 ? ` a partir de las <b>${_fmtHora(new Date(Date.now() + ms))}</b>` : '.'}`;
+    iniciarEspera(); return;
+  }
+  // Espera mínima desde el último registro (aunque haya sido en otra sesión)
+  const ms = msParaSiguiente();
+  if (ms > 0) {
+    btnE.disabled = true; btnS.disabled = true;
+    const seg = Math.ceil(ms / 1000);
+    if (hint) hint.innerHTML = `⏳ Tu último registro fue <b>${last === 'entrada' ? 'Entrada' : 'Salida'}</b>. Podrás hacer el siguiente en `
+      + `<b>${Math.floor(seg / 60)}:${String(seg % 60).padStart(2, '0')}</b> min (a las ${_fmtHora(new Date(Date.now() + ms))}).`;
+    iniciarEspera(); return;
+  }
   if (last === 'entrada') {
     btnE.disabled = true; btnS.disabled = false;
     if (hint) hint.textContent = '🟢 Tu último registro fue Entrada — ahora solo puedes registrar Salida.';
@@ -2275,6 +2371,11 @@ function disableActionBtns() {
 // RECORD
 // ══════════════════════════════════════════════════════════════
 async function registerRecord(type) {
+  // v2.3: un registro por sesión y espera mínima (el servidor también lo valida)
+  if (_registroSesion) { enableActionBtns(); return toast('Ya registraste un movimiento en esta sesión. Cierra sesión para el siguiente.', 'error'); }
+  if (msParaSiguiente() > 0) { enableActionBtns(); return toast(`Debes esperar ${ESPERA_MIN} minutos entre registros.`, 'error'); }
+  if (type !== (getLastRecordType() === 'entrada' ? 'salida' : 'entrada')) { enableActionBtns(); return; }
+  disableActionBtns();                                  // evita doble toque mientras se guarda
   const loc = getActiveLocation();
   const now = new Date();
   const dayOfWeek = now.getDay();
@@ -2328,14 +2429,22 @@ async function registerRecord(type) {
     if (r.ok) {
       toast(`${type === 'entrada' ? '🟢 Entrada' : '🔴 Salida'} registrada correctamente`, 'success');
       records.push(data.record);
+      _registroSesion = type;                           // v2.3: bloquea el otro movimiento en esta sesión
       loadMyRecords();
+      setTimeout(cargarCardex, 600);                    // v2.4: horas de la semana
       enableActionBtns();
       // Always show job hours modal on salida (even 0h — let user assign ADMIN)
       if (type === 'salida') {
         openJobHoursModal(data.record.id, totalHours ?? 0);
       }
-    } else { toast(data.error, 'error'); }
-  } catch(e) { toast('Error al registrar', 'error'); }
+    } else {
+      toast(data.error, 'error');
+      // si el servidor sabe de un registro más reciente (otro dispositivo), se memoriza
+      if (data.ultimo && !records.some(x => x.workerId === currentUser.id && x.timestamp === data.ultimo.timestamp))
+        records.push({ workerId: currentUser.id, type: data.ultimo.type, timestamp: data.ultimo.timestamp });
+      checkGeofence();
+    }
+  } catch(e) { toast('Error al registrar', 'error'); checkGeofence(); }
 }
 
 async function loadMyRecords() {

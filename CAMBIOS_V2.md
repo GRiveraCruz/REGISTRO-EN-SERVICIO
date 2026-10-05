@@ -50,3 +50,75 @@
 
 ## Dependencias nuevas
 `pg`, `bcryptjs`. Railway las instala con `npm install`.
+
+---
+
+# v2.3 — Un registro por sesión y espera mínima de 5 minutos
+
+- **Un solo registro por sesión:** al registrar Entrada (o Salida), los dos botones quedan
+  bloqueados hasta cerrar sesión. El mensaje dice "Ya registraste tu Entrada en esta
+  sesión. Para el siguiente registro cierra sesión y vuelve a entrar a partir de las HH:MM".
+  Al registrar la Salida se sigue abriendo la captura de horas por Job, como antes.
+- **Espera mínima:** entre un registro y el siguiente del mismo trabajador deben pasar al
+  menos **5 minutos**, aunque entre en otra sesión o en otro dispositivo. Mientras tanto,
+  los botones están bloqueados con cuenta regresiva ("Podrás hacer el siguiente en 4:56 min,
+  a las HH:MM"). Al cumplirse el tiempo, se habilita el botón que corresponde, siempre que
+  esté dentro de la geocerca.
+- **Se conserva el registro previo memorizado:** después de una Entrada solo se habilita
+  Salida, y al revés, igual que antes.
+- **El servidor también lo valida** (no solo la pantalla):
+  - registro antes de 5 minutos → 429 "Debes esperar m:ss min…";
+  - mismo tipo que el último registro → 409 "Tu último registro ya fue Entrada; ahora
+    corresponde Salida";
+  - candado por trabajador, para que un doble toque o dos dispositivos al mismo tiempo no
+    generen dos registros. Si el servidor tiene un registro más reciente, la pantalla lo
+    memoriza.
+- La espera se configura con la variable `KIOSCO_ESPERA_MIN` (5 por defecto).
+- **Probado:**
+  - Entrada → bloqueo de sesión; intentar Salida en la misma sesión no registra nada;
+  - nueva sesión a los pocos segundos → cuenta regresiva 4:56;
+  - API antes de 5 min → 429;
+  - después de 6 min, Entrada repetida → 409;
+  - dos Salidas simultáneas → solo una se guarda y la otra recibe 429.
+
+---
+
+# v2.4 — Pantalla de acceso simplificada y cardex del trabajador
+
+## 1. Pantalla de acceso
+- Ya no aparecen de entrada los campos de usuario y contraseña, que confundían a la
+  mayoría.
+- Ahora se ve un botón grande **"👷 Entrar como trabajador"** y, debajo, el enlace
+  **"Ingresar como administrador"**. El enlace muestra los campos de usuario y contraseña
+  (Enter pasa a la contraseña y entra), con un enlace para regresar.
+- Al cerrar sesión siempre se vuelve al acceso de trabajador.
+
+## 2. Cardex del trabajador (pantalla de inicio)
+- **Orden de la pantalla:**
+  - arriba, la ubicación (geocerca) y los botones de Entrada / Salida con su aviso;
+  - debajo, la tarjeta oscura con el reloj, la fecha, el nombre y el **cardex**;
+  - al final, "Mis últimos registros".
+- **Datos del cardex:**
+  - **Puesto actual** y área (Control de Personal de la Suite);
+  - **Fecha de ingreso** y **antigüedad** en años y meses;
+  - **Horario:** la jornada del **Tipo de Puesto** asignado al perfil en la Suite, agrupada
+    por días (ej. "Lun–Jue 07:00–17:00 · Vie 07:00–15:00"). Si el perfil no tiene tipo de
+    puesto, se usa la jornada configurada en el kiosco;
+  - **Días de vacaciones disponibles** (calculados por la Suite), con ganados, gozados y
+    por aprobar;
+  - **Total de horas esta semana** y **semana pasada** (lunes a domingo, hora de México):
+    suma de las jornadas registradas, con el rango de fechas, el número de jornadas y, si
+    hay una entrada sin salida, las horas en curso;
+  - **Ubicaciones permitidas** (o todas, si no tiene restricción).
+- El cardex se actualiza después de registrar.
+- Nuevo endpoint `GET /api/workers/:id/cardex`. La fecha de ingreso solo se entrega aquí,
+  para el trabajador que inició sesión, y no en la lista general de trabajadores.
+- La zona horaria para separar las semanas se puede cambiar con `KIOSCO_TZ`
+  (America/Mexico_City por defecto).
+
+## Cómo se probó
+- **Acceso:** el enlace muestra y oculta los campos de administrador.
+- **Cardex con datos de prueba:** Diseñador mecánico, ingreso 01/03/2020 (6 años, 7
+  meses), horario del tipo "Nocturno" (Lun–Vie 22:00–06:00), 102 días de vacaciones, 10 h
+  esta semana (1 jornada), 19.75 h la semana pasada (2 jornadas), Planta Norte.
+- Un trabajador sin tipo de puesto muestra la jornada del kiosco (07:00 – 17:00).
