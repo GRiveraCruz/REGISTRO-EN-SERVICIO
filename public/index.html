@@ -2228,7 +2228,10 @@ async function cargarCardex(){
       item('Días de vacaciones disponibles', vac, vacSub) +
       item('Total de horas esta semana', h(sa.horas), `${corta(sa.desde)} – ${fin(sa.desde)} · ${sa.jornadas} jornada${sa.jornadas===1?'':'s'}${sa.en_curso!=null?` · en curso: ${h(sa.en_curso)}`:''}`) +
       item('Total de horas semana pasada', h(sp.horas), `${corta(sp.desde)} – ${fin(sp.desde)} · ${sp.jornadas} jornada${sp.jornadas===1?'':'s'}`) +
-      item('Ubicaciones permitidas', c.ubicaciones.length ? c.ubicaciones.join(', ') : '—', c.todas_las_ubicaciones && c.ubicaciones.length ? 'Todas (sin restricción asignada)' : '');
+      item('Ubicaciones permitidas', c.ubicaciones.length ? c.ubicaciones.join(', ') : '—', c.todas_las_ubicaciones && c.ubicaciones.length ? 'Todas (sin restricción asignada)' : '') +
+      item('Jefe directo', c.jefe_directo ? c.jefe_directo.nombre : '—', c.jefe_directo ? (c.jefe_directo.puesto || '') : 'Sin jefe directo asignado') +
+      `<div class="cardex-item"><span class="cardex-lbl">Subordinados</span><span class="cardex-val">${c.subordinados}</span>`
+        + (c.subordinados ? `<span class="cardex-sub" title="${(c.subordinados_nombres||[]).join(', ')}">${(c.subordinados_nombres||[]).slice(0,3).join(', ')}${c.subordinados>3?` y ${c.subordinados-3} más`:''}</span>` : '') + `</div>`;
   } catch (e) { box.innerHTML = `<div class="cardex-cargando">Error de conexión: ${e.message}</div>`; }
 }
 

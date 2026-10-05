@@ -255,6 +255,14 @@ app.get('/api/workers/:id/cardex', aw(async (req, res) => {
   const locs = (await db.q('SELECT id, data FROM kiosco_ubicaciones ORDER BY created_at')).rows;
   const ids = (w && w.locationIds) || [];
   const ubicaciones = (ids.length ? locs.filter(l => ids.includes(l.id)) : locs).map(l => l.data.name || l.id);
+  // v2.5: jefe directo y subordinados (Control de Personal: campo jefe_directo = tid del jefe)
+  let jefe = null;
+  if (d.jefe_directo) {
+    const j = (await db.q('SELECT nombre, data FROM personal WHERE tid = $1', [d.jefe_directo])).rows[0];
+    if (j) jefe = { nombre: j.nombre || (j.data || {}).nombre, puesto: (j.data || {}).puesto || '' };
+  }
+  const subs = (await db.q(`SELECT nombre FROM personal WHERE data->>'jefe_directo' = $1
+                            AND COALESCE(data->>'estado', 'Activo') <> 'Baja' ORDER BY nombre`, [tid])).rows.map(r => r.nombre);
   // Vacaciones (Suite)
   let vacaciones = null;
   if (SUITE_URL) {
@@ -267,7 +275,7 @@ app.get('/api/workers/:id/cardex', aw(async (req, res) => {
   res.json({
     tid, nombre: p.nombre || d.nombre, puesto: d.puesto || '', area: p.area || d.area || '',
     fecha_ingreso: d.fecha_ingreso || null, antiguedad: aniosMeses(d.fecha_ingreso),
-    horario, vacaciones,
+    horario, vacaciones, jefe_directo: jefe, subordinados: subs.length, subordinados_nombres: subs.slice(0, 30),
     semana_actual: { desde: iso(lunes.esta), ...semana(iso(lunes.esta)), en_curso: enCurso },
     semana_pasada: { desde: iso(lunes.pasada), ...semana(iso(lunes.pasada)) },
     ubicaciones, todas_las_ubicaciones: !ids.length,

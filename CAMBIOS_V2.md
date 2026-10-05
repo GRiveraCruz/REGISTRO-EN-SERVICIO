@@ -122,3 +122,14 @@
   meses), horario del tipo "Nocturno" (Lun–Vie 22:00–06:00), 102 días de vacaciones, 10 h
   esta semana (1 jornada), 19.75 h la semana pasada (2 jornadas), Planta Norte.
 - Un trabajador sin tipo de puesto muestra la jornada del kiosco (07:00 – 17:00).
+
+---
+
+# v2.5 — Jefe directo y subordinados en el cardex
+
+- **Jefe directo:** nombre y puesto, del campo "Jefe Directo" de Control de Personal en la
+  Suite. Si no tiene, dice "Sin jefe directo asignado".
+- **Subordinados:** cuántas personas activas lo tienen como jefe directo, con los primeros
+  nombres. Al pasar el mouse se ve la lista completa.
+- Probado: un trabajador con jefe GARCIA RUIZ ANA y 3 subordinados; otro sin jefe y sin
+  subordinados.
