@@ -22,7 +22,12 @@ const db = require('./db');
 const app = express();
 const PORT = process.env.PORT || 3000;
 const SYNC_API_KEY = process.env.SYNC_API_KEY || '';
-const SUITE_URL = (process.env.SUITE_URL || '').replace(/\/$/, '');
+// Se acepta con o sin protocolo: "beta-persico.up.railway.app" → "https://beta-persico.up.railway.app"
+const SUITE_URL = (() => {
+  let u = (process.env.SUITE_URL || '').trim().replace(/\/+$/, '');
+  if (u && !/^https?:\/\//i.test(u)) u = 'https://' + u;
+  return u;
+})();
 // Secreto para guardar los PIN como HMAC (no en texto plano). Si no se define, se usa la
 // llave de sincronización; cambiarlo invalida los PIN existentes.
 const PIN_SECRET = process.env.KIOSCO_PIN_SECRET || SYNC_API_KEY || 'persico-kiosco';
@@ -573,7 +578,7 @@ app.get('/api/estado', aw(async (req, res) => {
   const n = async (t) => (await db.q(`SELECT count(*)::int AS n FROM ${t}`)).rows[0].n;
   res.json({ ok: true, base_de_datos: 'PostgreSQL (compartida con Persico Suite)', trabajadores: await n('personal'),
              registros: await n('kiosco_registros'), ubicaciones: await n('kiosco_ubicaciones'),
-             migracion_json: await db.getConfig('migracion_json', null), suite_url: !!SUITE_URL, sync_key: !!SYNC_API_KEY });
+             migracion_json: await db.getConfig('migracion_json', null), suite_url: SUITE_URL || null, sync_key: !!SYNC_API_KEY });
 }));
 
 // Fallback
