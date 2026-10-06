@@ -221,6 +221,7 @@
     .attendance-hero .worker-name { font-size: clamp(16px, 4vw, 22px); font-weight: 700; margin: 16px 0 4px; }
     .attendance-hero .worker-pos { font-size: 12px; opacity: .6; }
     /* v2.4: cardex del trabajador dentro de la tarjeta del reloj */
+    .chk-plain { text-transform: none !important; letter-spacing: normal !important; font-weight: 400 !important; color: var(--ink) !important; }
     .cardex { margin-top: 18px; padding-top: 16px; border-top: 1px solid rgba(255,255,255,.12); text-align: left;
               display: grid; grid-template-columns: repeat(auto-fit, minmax(230px, 1fr)); gap: 10px 22px; }
     .cardex-item { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
@@ -667,6 +668,7 @@
   <div class="main-content">
     <!-- PANEL: Registro (trabajador) -->
     <div class="panel" id="panel-registro">
+      <div id="dispAviso" style="display:none;margin:0 0 14px;padding:12px 14px;border-radius:var(--r);font-size:13px;line-height:1.4"></div>
       <div id="homeNotifications" style="display:flex;flex-direction:column;gap:8px;margin-bottom:16px"></div>
       <div class="geo-wrap">
         <div class="geo-status geo-checking" id="geoStatus">
@@ -954,6 +956,27 @@
     </div>
 
     <!-- PANEL: Reportes -->
+    <div class="panel" id="panel-dispositivos">
+      <div class="page-header"><h2>📱 Dispositivos</h2><p>Con qué celular o equipo puede registrar asistencia cada trabajador</p></div>
+      <div class="card" style="margin-bottom:16px">
+        <div class="card-title">Reglas</div>
+        <label class="chk-plain" style="display:flex;gap:8px;align-items:flex-start;margin:8px 0;font-size:13px"><input type="checkbox" id="dcfgControl" onchange="guardarCfgDispositivos()">
+          <span><b>Control de dispositivos</b><br><span style="color:var(--ink-soft);font-size:12px">Cada trabajador puede tener autorizado <b>un celular</b> (o tablet) y <b>una computadora</b>. Otro dispositivo del mismo tipo queda pendiente hasta que RH lo autorice, y al autorizarlo reemplaza al anterior.</span></span></label>
+        <label class="chk-plain" style="display:flex;gap:8px;align-items:flex-start;margin:8px 0;font-size:13px"><input type="checkbox" id="dcfgAuto" onchange="guardarCfgDispositivos()">
+          <span><b>Autorizar automáticamente el primer dispositivo de cada tipo</b><br><span style="color:var(--ink-soft);font-size:12px">El primer celular y la primera computadora con que entra un trabajador quedan autorizados sin pasar por RH.</span></span></label>
+        <label class="chk-plain" style="display:flex;gap:8px;align-items:flex-start;margin:8px 0;font-size:13px"><input type="checkbox" id="dcfgMovil" onchange="guardarCfgDispositivos()">
+          <span><b>Solo desde celular o tablet</b><br><span style="color:var(--ink-soft);font-size:12px">No se permite registrar entrada o salida desde una computadora.</span></span></label>
+      </div>
+      <div class="card"><div class="card-title" id="dispTitulo">Dispositivos</div>
+        <div style="display:flex;gap:8px;margin-bottom:10px;flex-wrap:wrap">
+          <input id="dispBuscar" placeholder="🔍 Buscar trabajador…" oninput="renderDispositivos()" style="flex:1;min-width:200px">
+          <select id="dispFiltro" onchange="renderDispositivos()"><option value="">Todos</option><option value="pendiente" selected>Pendientes</option><option value="autorizado">Autorizados</option><option value="rechazado">Rechazados / revocados</option></select>
+        </div>
+        <div class="table-wrap"><table><thead><tr><th>Trabajador</th><th>Dispositivo</th><th>Estado</th><th>Alta</th><th>Último uso</th><th>Motivo / notas</th><th>Acciones</th></tr></thead>
+          <tbody id="dispBody"></tbody></table></div>
+      </div>
+    </div>
+
     <div class="panel" id="panel-reportes">
       <div class="section-title">📊 Reportes de Asistencia</div>
       <div class="section-sub">Registro general y reporte semanal por trabajador</div>
@@ -999,7 +1022,7 @@
           <div class="card-title">Registros</div>
           <div class="table-wrap">
             <table>
-              <thead><tr><th>Trabajador</th><th>Fecha</th><th>Día</th><th>Hora</th><th>Tipo</th><th>Hrs Jornada</th><th>Hrs Base</th><th>Hrs Extra</th><th>Ubicación</th><th>Geocerca</th><th id="recordsAdminCol"></th></tr></thead>
+              <thead><tr><th>Trabajador</th><th>Fecha</th><th>Día</th><th>Hora</th><th>Tipo</th><th>Hrs Jornada</th><th>Hrs Base</th><th>Hrs Extra</th><th>Ubicación</th><th>Geocerca</th><th>Dispositivo</th><th id="recordsAdminCol"></th></tr></thead>
               <tbody id="recordsBody"></tbody>
             </table>
           </div>
@@ -2034,6 +2057,103 @@ function showLoginAlert(msg, type) {
   setTimeout(() => el.innerHTML = '', 4000);
 }
 
+// ═══ v2.6 — Dispositivos ═══
+let _disp = null;                     // {estado, mensaje, dispositivo}
+function obtenerDeviceId(){
+  let id = null;
+  try { id = localStorage.getItem('kiosco_device_id'); } catch (e) {}
+  if (!id) { const m = document.cookie.match(/(?:^|; )kiosco_did=([^;]+)/); if (m) id = decodeURIComponent(m[1]); }
+  if (!id) id = (crypto.randomUUID ? crypto.randomUUID() : Array.from(crypto.getRandomValues(new Uint8Array(16))).map(b=>b.toString(16).padStart(2,'0')).join(''));
+  try { localStorage.setItem('kiosco_device_id', id); } catch (e) {}
+  document.cookie = `kiosco_did=${encodeURIComponent(id)}; max-age=${60*60*24*730}; path=/; SameSite=Lax`;   // respaldo
+  return id;
+}
+function infoDispositivo(){
+  const uad = navigator.userAgentData;
+  return { maxTouchPoints: navigator.maxTouchPoints || 0, pantalla: `${screen.width}x${screen.height}`,
+           uaMobile: uad ? !!uad.mobile : null, plataforma: (uad && uad.platform) || navigator.platform || '' };
+}
+async function verificarDispositivoSesion(){
+  _disp = null;
+  try {
+    const r = await fetch('/api/dispositivos/verificar', { method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({ workerId: currentUser.id, deviceId: obtenerDeviceId(), info: infoDispositivo() }) });
+    _disp = await r.json();
+    if (!r.ok) _disp = { estado: 'error', mensaje: _disp.error };
+  } catch (e) { _disp = { estado: 'error', mensaje: 'No se pudo verificar el dispositivo: ' + e.message }; }
+  mostrarAvisoDispositivo();
+  if (_disp && _disp.estado === 'autorizado' && _disp.nuevo && _disp.mensaje) toast(_disp.mensaje, 'success');
+}
+function mostrarAvisoDispositivo(){
+  const el = document.getElementById('dispAviso'); if (!el) return;
+  if (!_disp || ['autorizado','sin_control'].includes(_disp.estado)) { el.style.display = 'none'; return; }
+  const rojo = _disp.estado === 'rechazado';
+  el.style.display = '';
+  el.style.background = rojo ? 'rgba(200,16,46,.08)' : 'rgba(245,158,11,.12)';
+  el.style.border = `1px solid ${rojo ? 'rgba(200,16,46,.35)' : 'rgba(245,158,11,.5)'}`;
+  el.innerHTML = `<b>${rojo ? '⛔ Dispositivo no permitido' : '⏳ Dispositivo pendiente de autorización'}</b><br>${_disp.mensaje || ''}
+    <div style="font-size:11px;color:var(--ink-soft);margin-top:4px">Puedes consultar tus permisos, órdenes de servicio y tareas desde aquí.</div>`;
+  if (typeof enableActionBtns === 'function' && currentUser) enableActionBtns();
+}
+
+let _dispData = null;
+async function cargarDispositivos(){
+  try { _dispData = await (await fetch('/api/dispositivos')).json(); }
+  catch (e) { toast('No se pudieron cargar los dispositivos', 'error'); return; }
+  const c = _dispData.config;
+  document.getElementById('dcfgControl').checked = c.control_activo;
+  document.getElementById('dcfgAuto').checked = c.auto_primer_dispositivo;
+  document.getElementById('dcfgMovil').checked = c.solo_movil;
+  const n = _dispData.dispositivos.filter(d => d.estado === 'pendiente').length;
+  if (!n && document.getElementById('dispFiltro').value === 'pendiente') document.getElementById('dispFiltro').value = '';
+  renderDispositivos();
+}
+async function guardarCfgDispositivos(){
+  const body = { control_activo: document.getElementById('dcfgControl').checked, auto_primer_dispositivo: document.getElementById('dcfgAuto').checked,
+                 solo_movil: document.getElementById('dcfgMovil').checked };
+  const r = await fetch('/api/dispositivos/config', { method:'PUT', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body) });
+  toast(r.ok ? 'Reglas guardadas' : 'No se pudieron guardar', r.ok ? 'success' : 'error');
+}
+function renderDispositivos(){
+  if (!_dispData) return;
+  const q = (document.getElementById('dispBuscar').value || '').toLowerCase(), f = document.getElementById('dispFiltro').value;
+  const lst = _dispData.dispositivos.filter(d => (!f || d.estado === f) && (!q || (d.nombre || '').toLowerCase().includes(q)));
+  const pend = _dispData.dispositivos.filter(d => d.estado === 'pendiente').length;
+  document.getElementById('dispTitulo').innerHTML = `Dispositivos ${pend ? `<span class="badge badge-red" style="margin-left:6px">${pend} pendiente${pend===1?'':'s'}</span>` : ''}`;
+  const fecha = v => v ? new Date(v).toLocaleString('es-MX', { day:'2-digit', month:'short', hour:'2-digit', minute:'2-digit' }) : '—';
+  const ico = t => ({ movil:'📱 Celular', tablet:'📟 Tablet', computadora:'💻 Computadora' }[t] || t || '—');
+  const badge = { autorizado:'badge-green', pendiente:'badge-red', rechazado:'' };
+  document.getElementById('dispBody').innerHTML = lst.map(d => {
+    const u = d.ultimo || d.primero || {};
+    const acciones = d.estado === 'pendiente'
+      ? `<button class="btn btn-primary btn-sm" onclick="accionDispositivo('${d.id}','autorizar')">Autorizar</button> <button class="btn btn-secondary btn-sm" onclick="accionDispositivo('${d.id}','rechazar')">Rechazar</button>`
+      : d.estado === 'autorizado'
+        ? `<button class="btn btn-secondary btn-sm" onclick="accionDispositivo('${d.id}','revocar')">Revocar</button> <label style="font-size:11px;white-space:nowrap"><input type="checkbox" ${d.compartido?'checked':''} onchange="accionDispositivo('${d.id}','compartido',this.checked)"> Compartido</label>`
+        : `<button class="btn btn-secondary btn-sm" onclick="accionDispositivo('${d.id}','autorizar')">Autorizar</button> <button class="btn btn-danger btn-sm" onclick="accionDispositivo('${d.id}','eliminar')">🗑</button>`;
+    const notas = [d.motivo, d.autorizado_por ? `autorizó ${d.autorizado_por}` : '', d.motivo_revocacion || '', d.compartido ? 'compartido (varios trabajadores)' : ''].filter(Boolean).join(' · ');
+    return `<tr><td><strong>${d.nombre}</strong><div style="font-size:11px;color:var(--ink-soft)">${d.area || ''}</div></td>
+      <td>${ico(u.tipo)}<div style="font-size:11px;color:var(--ink-soft)">${u.os || ''} · ${u.navegador || ''}${u.pantalla ? ' · ' + u.pantalla : ''}</div><div style="font-size:10px;color:var(--ink-soft)">cuenta como: <b>${d.categoria === 'computadora' ? 'computadora' : 'celular'}</b></div></td>
+      <td><span class="badge ${badge[d.estado] || ''}">${d.estado}</span></td>
+      <td style="font-size:12px">${fecha(d.alta || d.created_at)}</td><td style="font-size:12px">${fecha(d.ultimo_uso)}</td>
+      <td style="font-size:11px;color:var(--ink-soft);max-width:260px">${notas}</td><td style="white-space:nowrap">${acciones}</td></tr>`;
+  }).join('') || '<tr><td colspan="7" style="text-align:center;color:var(--ink-soft);padding:24px">Sin dispositivos en esta vista.</td></tr>';
+}
+async function accionDispositivo(id, accion, valor){
+  if (accion === 'autorizar') {
+    const d = _dispData.dispositivos.find(x => x.id === id);
+    const otros = _dispData.dispositivos.filter(x => x.workerId === d.workerId && x.id !== id && x.estado === 'autorizado' && x.categoria === d.categoria).length;
+    const queCosa = d.categoria === 'computadora' ? 'una computadora autorizada' : 'un celular autorizado';
+    if (otros && !confirm(`${d.nombre} ya tiene ${queCosa}. Solo se permite uno de cada tipo: al autorizar este, el anterior queda revocado. ¿Continuar?`)) return;
+  }
+  if (accion === 'revocar' && !confirm('¿Revocar este dispositivo? El trabajador ya no podrá registrar desde él.')) return;
+  if (accion === 'eliminar' && !confirm('¿Eliminar este registro de dispositivo?')) return;
+  const r = await fetch(`/api/dispositivos/${id}/accion`, { method:'POST', headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({ accion, compartido: valor, usuario: currentUser ? currentUser.username || currentUser.name : '' }) });
+  const d = await r.json();
+  if (!r.ok) return toast(d.error || 'Error', 'error');
+  toast('Listo', 'success'); cargarDispositivos();
+}
+
 function mostrarLoginAdmin(si){
   document.getElementById('loginWorkerBox').style.display = si ? 'none' : '';
   document.getElementById('loginAdminBox').style.display = si ? '' : 'none';
@@ -2076,6 +2196,7 @@ async function startApp() {
 
   if (currentUser.role === 'worker') {
     _registroSesion = null; detenerEspera();
+    await verificarDispositivoSesion();                   // v2.6
     try { ESPERA_MIN = (await (await fetch('/api/config/registro')).json()).espera_minutos ?? 5; } catch (e) {}
     // Pre-load this worker's records so entrada lookup works for job hours modal
     const r = await fetch(`/api/records?workerId=${currentUser.id}`);
@@ -2122,6 +2243,7 @@ function buildNav() {
     if (currentUser.role === 'rrhh') {
       navItems.push({ id:'trabajadores', icon:'👷', label:'Trabajadores' });
     }
+    navItems.push({ id:'dispositivos', icon:'📱', label:'Dispositivos' });   // v2.6
   }
 
   navItems.forEach(item => {
@@ -2156,6 +2278,7 @@ function showPanel(id) {
   if (id === 'ordenes-servicio') osKioskLoadList();
   if (id === 'tareas-asignadas') taKioskLoadList();
   if (id === 'notificaciones') loadNotifications();
+  if (id === 'dispositivos') cargarDispositivos();
 }
 
 // ══════════════════════════════════════════════════════════════
@@ -2337,6 +2460,12 @@ function enableActionBtns() {
   const btnE = document.getElementById('btnEntrada');
   const btnS = document.getElementById('btnSalida');
   const hint = document.getElementById('lastRecordHint');
+  // v2.6: dispositivo no autorizado → no se puede registrar desde aquí
+  if (_disp && (_disp.estado === 'pendiente' || _disp.estado === 'rechazado')) {
+    btnE.disabled = true; btnS.disabled = true;
+    if (hint) hint.innerHTML = '🔒 Registro bloqueado en este dispositivo.';
+    return;
+  }
   // Ya registró en esta sesión: no puede marcar el otro movimiento sin cerrar sesión
   if (_registroSesion) {
     btnE.disabled = true; btnS.disabled = true;
@@ -2423,7 +2552,8 @@ async function registerRecord(type) {
     lat: currentLat, lng: currentLng,
     locationId: loc ? loc.id : null, locationName: loc ? loc.name : 'N/A',
     inGeofence: true, totalHours, baseHours, extraHours, dayOfWeek,
-    timestamp: now.toISOString()
+    timestamp: now.toISOString(),
+    deviceId: obtenerDeviceId(), deviceInfo: infoDispositivo()      // v2.6
   };
 
   try {
@@ -2442,6 +2572,7 @@ async function registerRecord(type) {
       }
     } else {
       toast(data.error, 'error');
+      if (data.dispositivo_estado) { _disp = { estado: data.dispositivo_estado, mensaje: data.error }; mostrarAvisoDispositivo(); }
       // si el servidor sabe de un registro más reciente (otro dispositivo), se memoriza
       if (data.ultimo && !records.some(x => x.workerId === currentUser.id && x.timestamp === data.ultimo.timestamp))
         records.push({ workerId: currentUser.id, type: data.ultimo.type, timestamp: data.ultimo.timestamp });
@@ -3193,7 +3324,7 @@ function renderRecordsTable(recs) {
   const days = ['Dom','Lun','Mar','Mié','Jue','Vie','Sáb'];
   const recList = (recs || []).slice().reverse().slice(0,200);
 
-  const emptyMsg = `<tr><td colspan="10" style="text-align:center;color:var(--ink-soft);padding:32px;">Sin registros en el período seleccionado</td></tr>`;
+  const emptyMsg = `<tr><td colspan="11" style="text-align:center;color:var(--ink-soft);padding:32px;">Sin registros en el período seleccionado</td></tr>`;
   const emptyCard = `<p style="color:var(--ink-soft);font-size:13px;text-align:center;padding:24px;">Sin registros en el período seleccionado</p>`;
 
   // Desktop table
@@ -3214,6 +3345,7 @@ function renderRecordsTable(recs) {
         <td>${r.extraHours != null ? r.extraHours+' h' : '—'}</td>
         <td>${r.locationName || '—'}</td>
         <td><span class="badge ${r.inGeofence?'badge-green':'badge-red'}">${r.inGeofence?'✓':'✗'}</span></td>
+        <td title="${r.dispositivo ? `${r.dispositivo.os} · ${r.dispositivo.navegador}${r.dispositivo.autorizado===false?' · sin control de dispositivo':''}` : 'Registro anterior al control de dispositivos'}">${r.dispositivo ? ({movil:'📱 Celular', tablet:'📟 Tablet', computadora:'💻 Computadora'}[r.dispositivo.tipo] || r.dispositivo.tipo) : '—'}</td>
         ${isAdmin ? `<td style="display:flex;gap:4px;"><button class="btn btn-secondary btn-sm" onclick="editRecord('${r.id}')">✏️</button><button class="btn btn-danger btn-sm" onclick="deleteRecord('${r.id}')">🗑</button></td>` : ''}
       </tr>`;
     }).join('');

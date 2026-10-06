@@ -133,3 +133,88 @@
   nombres. Al pasar el mouse se ve la lista completa.
 - Probado: un trabajador con jefe GARCIA RUIZ ANA y 3 subordinados; otro sin jefe y sin
   subordinados.
+
+---
+
+# v2.6 — Control de dispositivos y tipo de dispositivo en cada registro
+
+## Por qué no la MAC
+Ningún navegador permite a una página leer la dirección MAC, y los celulares actuales usan
+una MAC aleatoria por red. En su lugar, cada navegador recibe un **identificador de
+dispositivo propio**. Se guarda en el teléfono (almacenamiento local, con una cookie de
+respaldo) y en el servidor solo como huella cifrada.
+
+## Cómo funciona
+- **Al entrar como trabajador**, el kiosco revisa el dispositivo:
+  - **El primer dispositivo** con el que entra queda **autorizado automáticamente** (se
+    puede desactivar) y se le avisa: "Este celular quedó registrado como tu dispositivo".
+  - **Desde otro dispositivo** queda **pendiente de autorización de RH**: aparece un aviso
+    y los botones de Entrada/Salida se bloquean. Permisos, órdenes de servicio y tareas
+    siguen disponibles.
+  - **Un dispositivo autorizado para un trabajador no sirve para otro**, para evitar
+    registros "prestados": queda pendiente, con el motivo "el dispositivo ya está
+    autorizado para X". La excepción es un dispositivo marcado como **compartido**, por
+    ejemplo una tablet fija en planta.
+- **El servidor también lo valida al registrar.** Un dispositivo pendiente o rechazado
+  recibe 403, aunque se manipule la página.
+- **Tipo de dispositivo:** cada registro guarda si fue **celular, tablet o computadora**,
+  junto con el sistema y el navegador. Se calcula con el User-Agent, la pantalla táctil y
+  Client Hints; un iPad que se presenta como Mac se reconoce como tablet. En **Reportes**
+  hay una columna nueva, "Dispositivo".
+
+## Panel "Dispositivos" (administrador y RRHH)
+- **Reglas:**
+  - control de dispositivos (encendido / apagado);
+  - autorizar automáticamente el primer dispositivo;
+  - **solo desde celular o tablet** (bloquea registros desde computadora).
+- **Lista:** trabajador, dispositivo (tipo, sistema, navegador, pantalla), estado, alta,
+  último uso y motivo. Filtros: pendientes, autorizados, rechazados.
+- **Acciones:**
+  - **Autorizar**: por defecto reemplaza al dispositivo anterior del trabajador, como en un
+    cambio de celular, y pide confirmación;
+  - **Rechazar**, **Revocar** y **Compartido**;
+  - **Eliminar**, para los rechazados.
+- La pestaña muestra cuántos dispositivos hay pendientes.
+
+## Límites conocidos
+- Si el trabajador borra los datos del navegador, usa modo incógnito o cambia de navegador,
+  se presenta como un dispositivo nuevo y RH tiene que autorizarlo de nuevo.
+- La detección celular / computadora la puede falsear un usuario técnico. Con el control de
+  dispositivos activo, ese equipo de todas formas queda pendiente de RH.
+- El siguiente paso sería **passkey** (huella o rostro del celular), que liga el registro al
+  dispositivo y a la persona.
+
+## Datos
+- Tabla nueva `kiosco_dispositivos`; se crea sola.
+- Reglas en `kiosco_config.dispositivos`.
+- Cada registro de asistencia guarda `data.dispositivo = {tipo, os, navegador, autorizado}`.
+
+## Probado
+- **Primer celular** → autorizado.
+- **Segundo dispositivo** → pendiente: el registro se rechaza con 403 y los botones se
+  bloquean con aviso.
+- **Autorizar el segundo** → el primero queda revocado.
+- **Celular de otro trabajador** → pendiente; marcado como compartido → autorizado.
+- **"Solo celular":** computadora rechazada, celular aceptado.
+- **Registro aceptado:** guarda celular · Android · Chrome.
+
+---
+
+# v2.7 — Un celular y una computadora por trabajador
+
+- **Regla:** cada trabajador puede tener autorizado **un celular** (una tablet cuenta como
+  celular) **y una computadora**, no más de uno de cada tipo.
+- **Primer dispositivo de cada tipo:** el primer celular y la primera computadora con que
+  entra quedan autorizados automáticamente, si esa regla está activa.
+- **Un segundo dispositivo del mismo tipo** queda **pendiente**, con el motivo "ya tienes un
+  celular autorizado; solo se permite uno de cada tipo" (o una computadora).
+- **Al autorizarlo,** RH reemplaza **solo al anterior del mismo tipo**, como en un cambio
+  de celular. El dispositivo del otro tipo no se toca.
+- **Categoría:** se fija con el tipo detectado al dar de alta el dispositivo. El panel la
+  muestra ("cuenta como: celular / computadora") y la confirmación de autorizar lo
+  explica.
+- Los dispositivos registrados con la v2.6 toman su categoría del tipo con que se dieron de
+  alta.
+- **Probado:** celular 1 y computadora 1 autorizados; celular 2 y computadora 2
+  pendientes. Al autorizar el celular 2: celular 1 revocado, computadora 1 sigue
+  autorizada y computadora 2 sigue pendiente.

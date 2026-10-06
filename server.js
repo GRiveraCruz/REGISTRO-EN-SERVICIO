@@ -282,6 +282,139 @@ app.get('/api/workers/:id/cardex', aw(async (req, res) => {
   });
 }));
 
+// ─── DISPOSITIVOS (v2.6) ─────────────────────────────────────────────────────
+// Cada navegador genera un identificador propio (se guarda en el teléfono). El primer
+// dispositivo con el que entra un trabajador queda autorizado; desde otro dispositivo
+// no puede registrar asistencia hasta que RH lo autorice. Un dispositivo autorizado
+// para un trabajador no sirve para otro, salvo que RH lo marque como "compartido"
+// (por ejemplo una tablet fija en planta). Además se detecta si es celular o computadora.
+const DEF_DISP = { control_activo: true, solo_movil: false, auto_primer_dispositivo: true };
+async function cfgDispositivos() { return { ...DEF_DISP, ...(await db.getConfig('dispositivos', {})) }; }
+const hashDispositivo = (id) => crypto.createHmac('sha256', PIN_SECRET).update('disp:' + String(id)).digest('hex');
+
+// Tipo de dispositivo a partir del User-Agent (lo que dice el navegador al servidor)
+function tipoPorUA(ua) {
+  ua = String(ua || '');
+  const os = /iPhone|iPod/.test(ua) ? 'iPhone' : /iPad/.test(ua) ? 'iPad' : /Android/.test(ua) ? 'Android'
+           : /Windows/.test(ua) ? 'Windows' : /Macintosh|Mac OS X/.test(ua) ? 'Mac' : /Linux/.test(ua) ? 'Linux' : 'Otro';
+  const nav = /Edg\//.test(ua) ? 'Edge' : /OPR\//.test(ua) ? 'Opera' : /Chrome\//.test(ua) ? 'Chrome' : /Firefox\//.test(ua) ? 'Firefox' : /Safari\//.test(ua) ? 'Safari' : 'Otro';
+  let tipo = /iPad|Tablet/.test(ua) || (/Android/.test(ua) && !/Mobile/.test(ua)) ? 'tablet'
+           : /Mobi|iPhone|iPod|Android/.test(ua) ? 'movil' : 'computadora';
+  return { tipo, os, navegador: nav };
+}
+// Combina lo que reporta la página (pantalla táctil, Client Hints) con el User-Agent.
+// Un iPad moderno se presenta como Mac: si es táctil, se toma como tablet.
+function clasificar(req, info) {
+  const s = tipoPorUA(req.headers['user-agent']);
+  const i = info || {};
+  let tipo = s.tipo;
+  if (tipo === 'computadora' && s.os === 'Mac' && (i.maxTouchPoints || 0) > 1) tipo = 'tablet';
+  if (i.uaMobile === true && tipo === 'computadora') tipo = 'movil';
+  return { tipo, os: s.os, navegador: s.navegador, pantalla: i.pantalla || '', tactil: (i.maxTouchPoints || 0) > 0,
+           plataforma: i.plataforma || '', modelo: i.modelo || '', ua: String(req.headers['user-agent'] || '').slice(0, 300) };
+}
+const NOMBRE_TIPO = { movil: 'Celular', tablet: 'Tablet', computadora: 'Computadora' };
+// v2.7: cada trabajador puede tener autorizado UN celular (tablet cuenta como celular) y
+// UNA computadora. La categoría se fija con el tipo detectado al dar de alta el dispositivo.
+const categoriaDe = (tipo) => (tipo === 'computadora' ? 'computadora' : 'movil');
+const NOMBRE_CAT = { movil: 'celular', computadora: 'computadora' };
+const SQL_CAT = `COALESCE(data->>'categoria', CASE WHEN data->'primero'->>'tipo' = 'computadora' THEN 'computadora' ELSE 'movil' END)`;
+
+// Revisa (y si corresponde, registra) el dispositivo del trabajador.
+// → { estado: 'autorizado'|'pendiente'|'rechazado'|'sin_control', mensaje, dispositivo }
+async function verificarDispositivo(req, workerId, deviceId, info) {
+  const cfg = await cfgDispositivos();
+  const disp = clasificar(req, info);
+  if (cfg.solo_movil && disp.tipo === 'computadora')
+    return { estado: 'rechazado', motivo: 'solo_movil', dispositivo: disp,
+             mensaje: 'Los registros de asistencia solo se pueden hacer desde un celular o tablet.' };
+  if (!cfg.control_activo) return { estado: 'sin_control', dispositivo: disp };
+  if (!deviceId || String(deviceId).length < 16)
+    return { estado: 'rechazado', dispositivo: disp, mensaje: 'No se pudo identificar este dispositivo. Actualiza la página e inténtalo de nuevo.' };
+  const h = hashDispositivo(deviceId);
+  return await db.tx(async (c) => {
+    await c.query('SELECT pg_advisory_xact_lock(hashtext($1))', ['kiosco-disp:' + workerId]);
+    const propio = (await c.query('SELECT * FROM kiosco_dispositivos WHERE worker_tid = $1 AND device_hash = $2', [workerId, h])).rows[0];
+    const ahora = new Date().toISOString();
+    if (propio) {
+      await c.query(`UPDATE kiosco_dispositivos SET data = data || $2, updated_at = now() WHERE id = $1`,
+                    [propio.id, JSON.stringify({ ultimo_uso: ahora, ultimo: disp })]);
+      if (propio.estado === 'autorizado') return { estado: 'autorizado', dispositivo: disp };
+      if (propio.estado === 'rechazado')
+        return { estado: 'rechazado', dispositivo: disp, mensaje: 'Recursos Humanos rechazó este dispositivo. Usa tu dispositivo autorizado o habla con RH.' };
+      return { estado: 'pendiente', dispositivo: disp, mensaje: 'Este dispositivo está pendiente de autorización de Recursos Humanos.' };
+    }
+    // ¿El dispositivo ya está autorizado para otro trabajador? (salvo que sea compartido)
+    const otro = (await c.query(`SELECT d.*, p.nombre FROM kiosco_dispositivos d LEFT JOIN personal p ON p.tid = d.worker_tid
+                                 WHERE d.device_hash = $1 AND d.worker_tid <> $2 AND d.estado = 'autorizado'`, [h, workerId])).rows;
+    const compartido = otro.some(o => (o.data || {}).compartido);
+    const cat = categoriaDe(disp.tipo);
+    const propiosAut = (await c.query(`SELECT count(*)::int AS n FROM kiosco_dispositivos WHERE worker_tid = $1 AND estado = 'autorizado' AND ${SQL_CAT} = $2`, [workerId, cat])).rows[0].n;
+    let estado = 'pendiente', motivo;
+    if (compartido) { estado = 'autorizado'; motivo = 'dispositivo compartido'; }
+    else if (otro.length) motivo = `el dispositivo ya está autorizado para ${otro.map(o => o.nombre || o.worker_tid).join(', ')}`;
+    else if (!propiosAut && cfg.auto_primer_dispositivo) { estado = 'autorizado'; motivo = `primer ${NOMBRE_CAT[cat]} del trabajador`; }
+    else motivo = `ya tienes ${cat === 'movil' ? 'un celular autorizado' : 'una computadora autorizada'}; solo se permite uno de cada tipo`;
+    await c.query(`INSERT INTO kiosco_dispositivos (id, worker_tid, device_hash, estado, data) VALUES ($1,$2,$3,$4,$5)`,
+                  [uuidv4(), workerId, h, estado, JSON.stringify({ alta: ahora, ultimo_uso: ahora, primero: disp, ultimo: disp, motivo, categoria: cat,
+                    autorizado_por: estado === 'autorizado' ? 'automático' : null, autorizado_at: estado === 'autorizado' ? ahora : null })]);
+    if (estado === 'autorizado') return { estado, dispositivo: disp, nuevo: true, mensaje: compartido ? '' : `Este ${NOMBRE_TIPO[disp.tipo].toLowerCase()} quedó registrado como tu ${NOMBRE_CAT[cat]} para registrar asistencia.` };
+    return { estado, dispositivo: disp, nuevo: true,
+             mensaje: `Este dispositivo no está autorizado (${motivo}). Se envió la solicitud a Recursos Humanos; mientras tanto no puedes registrar entrada o salida desde aquí.` };
+  });
+}
+
+app.post('/api/dispositivos/verificar', aw(async (req, res) => {
+  const { workerId, deviceId, info } = req.body || {};
+  const w = await trabajadorPorId(workerId);
+  if (!w) return res.status(404).json({ error: 'Trabajador no encontrado' });
+  res.json(await verificarDispositivo(req, w.id, deviceId, info));
+}));
+
+// Administración (panel "Dispositivos" del kiosco: admin y RRHH)
+app.get('/api/dispositivos', aw(async (req, res) => {
+  const r = await db.q(`SELECT d.id, d.worker_tid, d.estado, d.data, d.created_at, d.updated_at, p.nombre, p.area
+                        FROM kiosco_dispositivos d LEFT JOIN personal p ON p.tid = d.worker_tid
+                        ORDER BY (d.estado = 'pendiente') DESC, d.updated_at DESC`);
+  res.json({ config: await cfgDispositivos(), dispositivos: r.rows.map(x => ({ id: x.id, workerId: x.worker_tid, nombre: x.nombre || x.worker_tid,
+    area: x.area || '', estado: x.estado, ...x.data, categoria: (x.data || {}).categoria || categoriaDe(((x.data || {}).primero || {}).tipo),
+    created_at: x.created_at, updated_at: x.updated_at })) });
+}));
+app.put('/api/dispositivos/config', aw(async (req, res) => {
+  const b = req.body || {}, cfg = await cfgDispositivos();
+  for (const k of Object.keys(DEF_DISP)) if (k in b) cfg[k] = !!b[k];
+  await db.setConfig('dispositivos', cfg);
+  res.json({ success: true, config: cfg });
+}));
+// accion: autorizar | rechazar | revocar | compartido (on/off) | eliminar
+app.post('/api/dispositivos/:id/accion', aw(async (req, res) => {
+  const { accion, usuario, reemplazar, compartido } = req.body || {};
+  const d = (await db.q('SELECT * FROM kiosco_dispositivos WHERE id = $1', [req.params.id])).rows[0];
+  if (!d) return res.status(404).json({ error: 'Dispositivo no encontrado' });
+  const ahora = new Date().toISOString();
+  if (accion === 'eliminar') { await db.q('DELETE FROM kiosco_dispositivos WHERE id = $1', [d.id]); return res.json({ success: true }); }
+  if (accion === 'compartido') {
+    await db.q('UPDATE kiosco_dispositivos SET data = data || $2, updated_at = now() WHERE id = $1', [d.id, JSON.stringify({ compartido: !!compartido })]);
+    return res.json({ success: true });
+  }
+  const estado = { autorizar: 'autorizado', rechazar: 'rechazado', revocar: 'rechazado' }[accion];
+  if (!estado) return res.status(400).json({ error: 'Acción inválida' });
+  await db.tx(async (c) => {
+    if (estado === 'autorizado') {
+      // v2.7: máximo uno por categoría → el nuevo reemplaza al anterior DE LA MISMA categoría
+      // (cambio de celular o de computadora); el de la otra categoría no se toca
+      const cat = (d.data || {}).categoria || categoriaDe(((d.data || {}).primero || {}).tipo);
+      await c.query(`UPDATE kiosco_dispositivos SET estado = 'rechazado', data = data || $4, updated_at = now()
+                     WHERE worker_tid = $1 AND id <> $2 AND estado = 'autorizado' AND ${SQL_CAT} = $3`,
+                    [d.worker_tid, d.id, cat, JSON.stringify({ revocado_por: usuario || '', revocado_at: ahora, motivo_revocacion: `reemplazado por otro ${NOMBRE_CAT[cat]}` })]);
+      await c.query(`UPDATE kiosco_dispositivos SET data = data || $2 WHERE id = $1`, [d.id, JSON.stringify({ categoria: cat })]);
+    }
+    const extra = estado === 'autorizado' ? { autorizado_por: usuario || '', autorizado_at: ahora } : { revocado_por: usuario || '', revocado_at: ahora };
+    await c.query('UPDATE kiosco_dispositivos SET estado = $2, data = data || $3, updated_at = now() WHERE id = $1', [d.id, estado, JSON.stringify(extra)]);
+  });
+  res.json({ success: true });
+}));
+
 // ─── VACACIONES (saldo, desde la Suite) ──────────────────────────────────────
 app.get('/api/vacaciones/:workerId', aw(async (req, res) => {
   if (!SUITE_URL) return res.status(500).json({ error: 'SUITE_URL no está configurada en el servidor' });
@@ -596,6 +729,12 @@ app.post('/api/records', aw(async (req, res) => {
   delete b.id; delete b.workerId; delete b.workerName; delete b.type; delete b.timestamp;
   if (!workerId) return res.status(400).json({ error: 'Falta identificar al trabajador' });
   if (!['entrada', 'salida'].includes(tipo)) return res.status(400).json({ error: 'Tipo de registro inválido' });
+  // v2.6: dispositivo autorizado (y celular, si así se configuró) + tipo de dispositivo en el registro
+  const ver = await verificarDispositivo(req, workerId, b.deviceId, b.deviceInfo);
+  delete b.deviceId; delete b.deviceInfo;
+  if (ver.estado === 'pendiente' || ver.estado === 'rechazado')
+    return res.status(403).json({ error: ver.mensaje || 'Dispositivo no autorizado', dispositivo_estado: ver.estado });
+  b.dispositivo = { tipo: ver.dispositivo.tipo, os: ver.dispositivo.os, navegador: ver.dispositivo.navegador, autorizado: ver.estado === 'autorizado' };
   const resultado = await db.tx(async (c) => {
     await c.query('SELECT pg_advisory_xact_lock(hashtext($1))', ['kiosco-registro:' + workerId]);
     const ult = (await c.query('SELECT tipo, ts FROM kiosco_registros WHERE worker_tid = $1 ORDER BY ts DESC LIMIT 1', [workerId])).rows[0];

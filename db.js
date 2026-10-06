@@ -68,6 +68,17 @@ CREATE TABLE IF NOT EXISTS kiosco_config (
   data       JSONB NOT NULL DEFAULT '{}'::jsonb,
   updated_at TIMESTAMP DEFAULT now()
 );
+CREATE TABLE IF NOT EXISTS kiosco_dispositivos (
+  id            VARCHAR PRIMARY KEY,
+  worker_tid    VARCHAR NOT NULL,
+  device_hash   VARCHAR NOT NULL,
+  estado        VARCHAR NOT NULL DEFAULT 'pendiente',
+  data          JSONB NOT NULL DEFAULT '{}'::jsonb,
+  created_at    TIMESTAMP DEFAULT now(),
+  updated_at    TIMESTAMP DEFAULT now(),
+  CONSTRAINT uq_kiosco_dispositivos UNIQUE (worker_tid, device_hash)
+);
+CREATE INDEX IF NOT EXISTS ix_kiosco_dispositivos_hash ON kiosco_dispositivos (device_hash);
 -- Si la Suite creó las tablas primero (SQLAlchemy no pone defaults en la base), se agregan:
 ALTER TABLE kiosco_registros    ALTER COLUMN data SET DEFAULT '{}'::jsonb, ALTER COLUMN created_at SET DEFAULT now();
 ALTER TABLE kiosco_trabajadores ALTER COLUMN data SET DEFAULT '{}'::jsonb, ALTER COLUMN updated_at SET DEFAULT now();
