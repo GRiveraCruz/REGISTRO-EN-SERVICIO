@@ -218,3 +218,23 @@ respaldo) y en el servidor solo como huella cifrada.
 - **Probado:** celular 1 y computadora 1 autorizados; celular 2 y computadora 2
   pendientes. Al autorizar el celular 2: celular 1 revocado, computadora 1 sigue
   autorizada y computadora 2 sigue pendiente.
+
+---
+
+# v2.8 — Un solo calendario para elegir el periodo del permiso
+
+- En **Solicitar Permiso → Días completos** (vacaciones y cualquier permiso por días), los
+  dos campos "Fecha inicio" y "Fecha fin" se reemplazaron por **un solo calendario**.
+  - Se toca el **primer día** y luego el **último**; el periodo se resalta. Para un solo
+    día, se toca dos veces.
+  - Si se toca un día anterior al inicio, ese pasa a ser el nuevo inicio. Un tercer toque
+    empieza otro periodo.
+  - Navegación por meses (‹ ›), semana de lunes a domingo, el día de hoy marcado, fines de
+    semana en ámbar y **días festivos de ley** con un punto.
+  - Debajo se muestra el resumen: "Del mar 10 de nov al sáb 21 de nov · 12 días naturales
+    · **8 hábiles** (lun–vie sin festivos)", con el enlace **Limpiar**.
+  - **En Vacaciones**, si los días hábiles pasan del saldo disponible, aparece un aviso
+    en rojo.
+- El envío no cambia (`fecha_inicio` / `fecha_fin`). Si falta el último día, se pide
+  tocarlo.
+- **Por horas** sigue igual: un día con hora de inicio y fin.

@@ -221,6 +221,24 @@
     .attendance-hero .worker-name { font-size: clamp(16px, 4vw, 22px); font-weight: 700; margin: 16px 0 4px; }
     .attendance-hero .worker-pos { font-size: 12px; opacity: .6; }
     /* v2.4: cardex del trabajador dentro de la tarjeta del reloj */
+    /* v2.8: calendario de periodo para permisos */
+    .pmcal { border: 1.5px solid var(--border); border-radius: var(--r); padding: 10px; user-select: none; }
+    .pmcal-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 8px; }
+    .pmcal-head b { font-size: 15px; text-transform: capitalize; }
+    .pmcal-nav { border: 1px solid var(--border); background: transparent; border-radius: 8px; width: 38px; height: 34px; font-size: 16px; cursor: pointer; color: var(--ink); }
+    .pmcal-grid { display: grid; grid-template-columns: repeat(7, 1fr); gap: 3px; }
+    .pmcal-dow { text-align: center; font-size: 11px; font-weight: 700; color: var(--ink-soft); padding: 4px 0; }
+    .pmcal-dia { text-align: center; padding: 9px 0; border-radius: 8px; font-size: 14px; cursor: pointer; border: 1px solid transparent; position: relative; }
+    .pmcal-dia:hover { border-color: var(--border); }
+    .pmcal-dia.fuera { visibility: hidden; }
+    .pmcal-dia.pasado { color: var(--ink-soft); opacity: .55; }
+    .pmcal-dia.finde, .pmcal-dia.festivo { color: #b45309; }
+    .pmcal-dia.festivo::after { content: ''; position: absolute; left: 50%; bottom: 3px; width: 4px; height: 4px; margin-left: -2px; border-radius: 50%; background: #b45309; }
+    .pmcal-dia.hoy { border-color: var(--red); font-weight: 700; }
+    .pmcal-dia.rango { background: rgba(200,16,46,.12); border-radius: 0; color: var(--ink); opacity: 1; }
+    .pmcal-dia.ini, .pmcal-dia.fin { background: var(--red); color: #fff !important; font-weight: 700; opacity: 1; }
+    .pmcal-dia.ini { border-radius: 8px 0 0 8px; } .pmcal-dia.fin { border-radius: 0 8px 8px 0; } .pmcal-dia.ini.fin { border-radius: 8px; }
+    .pmcal-resumen { font-size: 12.5px; color: var(--ink-soft); margin: 8px 0 14px; line-height: 1.45; }
     .chk-plain { text-transform: none !important; letter-spacing: normal !important; font-weight: 400 !important; color: var(--ink) !important; }
     .cardex { margin-top: 18px; padding-top: 16px; border-top: 1px solid rgba(255,255,255,.12); text-align: left;
               display: grid; grid-template-columns: repeat(auto-fit, minmax(230px, 1fr)); gap: 10px 22px; }
@@ -714,7 +732,7 @@
         <div class="card-title">📝 Solicitar Permiso</div>
         <div class="form-group">
           <label>Tipo de Permiso</label>
-          <select id="pmTipo" onchange="pmKioskVacaciones()">
+          <select id="pmTipo" onchange="pmKioskVacaciones(); pmCalRender()">
             <option value="Vacaciones">Vacaciones</option>
             <option value="Permiso por horas">Permiso por horas</option>
             <option value="Tiempo por Tiempo">Tiempo por Tiempo</option>
@@ -730,8 +748,11 @@
           <button class="btn btn-secondary btn-sm" id="pmModHorasBtn" onclick="pmKioskSetModalidad('horas')" style="flex:1">⏱ Por horas</button>
         </div>
         <div id="pmFieldsDias">
-          <div class="form-group"><label>Fecha Inicio</label><input type="date" id="pmFechaInicio"></div>
-          <div class="form-group"><label>Fecha Fin</label><input type="date" id="pmFechaFin"></div>
+          <!-- v2.8: un solo calendario para elegir el periodo (toca el primer día y luego el último) -->
+          <input type="hidden" id="pmFechaInicio"><input type="hidden" id="pmFechaFin">
+          <div class="form-group" style="margin-bottom:8px"><label>Periodo del permiso</label></div>
+          <div id="pmCal" class="pmcal"></div>
+          <div id="pmCalResumen" class="pmcal-resumen">Toca el primer día del permiso y después el último. Para un solo día, tócalo dos veces.</div>
         </div>
         <div id="pmFieldsHoras" style="display:none">
           <div class="form-group"><label>Fecha</label><input type="date" id="pmFechaH"></div>
@@ -1618,7 +1639,8 @@ async function pmKioskSubmit(){
   if (modalidad === 'dias') {
     body.fecha_inicio = document.getElementById('pmFechaInicio').value;
     body.fecha_fin    = document.getElementById('pmFechaFin').value;
-    if (!body.fecha_inicio || !body.fecha_fin) return pmShowAlert('Completa las fechas', 'error');
+    if (!body.fecha_inicio) return pmShowAlert('Selecciona en el calendario el periodo del permiso', 'error');
+    if (!body.fecha_fin) return pmShowAlert('Toca en el calendario el último día del permiso (o el mismo día otra vez si es solo uno)', 'error');
   } else {
     body.fecha       = document.getElementById('pmFechaH').value;
     body.hora_inicio  = document.getElementById('pmHoraInicio').value;
@@ -1634,12 +1656,86 @@ async function pmKioskSubmit(){
     if (!r.ok) { pmShowAlert(data.error || 'Error al enviar la solicitud', 'error'); return; }
     pmShowAlert('Solicitud enviada ✓ Se avisará a tu Jefe Directo y a RRHH.', 'success');
     ['pmMotivo','pmFechaInicio','pmFechaFin','pmFechaH','pmHoraInicio','pmHoraFin'].forEach(id => document.getElementById(id).value = '');
+    pmCalReset();
     pmKioskLoadStatus(); pmKioskVacaciones();
   } catch (e) {
     pmShowAlert('Error de conexión: ' + e.message, 'error');
   } finally {
     btn.disabled = false; btn.textContent = 'Enviar Solicitud →';
   }
+}
+
+// ═══ v2.8 — Calendario de periodo (permisos por días / vacaciones) ═══
+const _pmCal = { mes: null, ini: null, fin: null, saldo: null };
+const PMCAL_MESES = ['enero','febrero','marzo','abril','mayo','junio','julio','agosto','septiembre','octubre','noviembre','diciembre'];
+const pmIso = d => `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`;
+const pmDeIso = s => { const [y,m,d] = s.split('-').map(Number); return new Date(y, m-1, d); };
+function pmFestivos(y){
+  // días de descanso obligatorio (LFT): 1 ene, 1er lun feb, 3er lun mar, 1 may, 16 sep, 3er lun nov, 25 dic (+1 oct cada 6 años)
+  const nLunes = (mes, n) => { const d = new Date(y, mes, 1); const off = (8 - d.getDay()) % 7; return pmIso(new Date(y, mes, 1 + off + (n-1)*7)); };
+  const f = new Set([`${y}-01-01`, nLunes(1,1), nLunes(2,3), `${y}-05-01`, `${y}-09-16`, nLunes(10,3), `${y}-12-25`]);
+  if ((y - 2024) % 6 === 0) f.add(`${y}-10-01`);
+  return f;
+}
+function pmCalReset(){
+  _pmCal.ini = _pmCal.fin = null;
+  const hoy = new Date(); _pmCal.mes = new Date(hoy.getFullYear(), hoy.getMonth(), 1);
+  document.getElementById('pmFechaInicio').value = ''; document.getElementById('pmFechaFin').value = '';
+  pmCalRender();
+}
+function pmCalMover(n){ _pmCal.mes = new Date(_pmCal.mes.getFullYear(), _pmCal.mes.getMonth() + n, 1); pmCalRender(); }
+function pmCalTocar(iso){
+  if (!_pmCal.ini || _pmCal.fin) { _pmCal.ini = iso; _pmCal.fin = null; }          // empieza un periodo nuevo
+  else if (iso >= _pmCal.ini) { _pmCal.fin = iso; }                                 // cierra el periodo
+  else { _pmCal.ini = iso; }                                                        // tocó antes del inicio: nuevo inicio
+  document.getElementById('pmFechaInicio').value = _pmCal.ini || '';
+  document.getElementById('pmFechaFin').value = _pmCal.fin || '';
+  pmCalRender();
+}
+function pmCalRender(){
+  const box = document.getElementById('pmCal'); if (!box) return;
+  if (!_pmCal.mes) { const h = new Date(); _pmCal.mes = new Date(h.getFullYear(), h.getMonth(), 1); }
+  const y = _pmCal.mes.getFullYear(), m = _pmCal.mes.getMonth();
+  const fest = new Set([...pmFestivos(y - 1), ...pmFestivos(y), ...pmFestivos(y + 1)]);
+  const hoyIso = pmIso(new Date());
+  const primero = new Date(y, m, 1), offset = (primero.getDay() + 6) % 7;         // semana inicia en lunes
+  const dias = new Date(y, m + 1, 0).getDate();
+  const fin = _pmCal.fin || _pmCal.ini;
+  let celdas = '';
+  for (let i = 0; i < offset; i++) celdas += '<div class="pmcal-dia fuera"></div>';
+  for (let d = 1; d <= dias; d++) {
+    const f = new Date(y, m, d), iso = pmIso(f), dow = f.getDay();
+    const cls = ['pmcal-dia'];
+    if (iso < hoyIso) cls.push('pasado');
+    if (dow === 0 || dow === 6) cls.push('finde');
+    if (fest.has(iso)) cls.push('festivo');
+    if (iso === hoyIso) cls.push('hoy');
+    if (_pmCal.ini && iso >= _pmCal.ini && iso <= fin) cls.push('rango');
+    if (iso === _pmCal.ini) cls.push('ini');
+    if (iso === fin && _pmCal.ini) cls.push('fin');
+    celdas += `<div class="${cls.join(' ')}" onclick="pmCalTocar('${iso}')" title="${fest.has(iso) ? 'Día festivo' : ''}">${d}</div>`;
+  }
+  box.innerHTML = `<div class="pmcal-head"><button type="button" class="pmcal-nav" onclick="pmCalMover(-1)" aria-label="Mes anterior">‹</button>
+      <b>${PMCAL_MESES[m]} ${y}</b><button type="button" class="pmcal-nav" onclick="pmCalMover(1)" aria-label="Mes siguiente">›</button></div>
+    <div class="pmcal-grid">${['L','M','M','J','V','S','D'].map(x => `<div class="pmcal-dow">${x}</div>`).join('')}${celdas}</div>`;
+  pmCalResumen(fest);
+}
+function pmCalResumen(fest){
+  const el = document.getElementById('pmCalResumen'); if (!el) return;
+  if (!_pmCal.ini) { el.innerHTML = 'Toca el primer día del permiso y después el último. Para un solo día, tócalo dos veces.'; return; }
+  const corto = iso => pmDeIso(iso).toLocaleDateString('es-MX', { weekday: 'short', day: 'numeric', month: 'short' });
+  if (!_pmCal.fin) { el.innerHTML = `Inicio: <b>${corto(_pmCal.ini)}</b>. Ahora toca el último día (o el mismo día otra vez si es solo uno).`; return; }
+  let nat = 0, hab = 0;
+  for (let d = pmDeIso(_pmCal.ini); pmIso(d) <= _pmCal.fin; d.setDate(d.getDate() + 1)) {
+    nat++; const dow = d.getDay();
+    if (dow !== 0 && dow !== 6 && !fest.has(pmIso(d))) hab++;
+  }
+  const vac = document.getElementById('pmTipo').value === 'Vacaciones';
+  const exceso = vac && _pmCal.saldo != null && hab > _pmCal.saldo;
+  el.innerHTML = `<b>${_pmCal.ini === _pmCal.fin ? corto(_pmCal.ini) : `Del ${corto(_pmCal.ini)} al ${corto(_pmCal.fin)}`}</b>
+    · ${nat} día${nat === 1 ? '' : 's'} natural${nat === 1 ? '' : 'es'} · <b>${hab} hábil${hab === 1 ? '' : 'es'}</b> (lun–vie sin festivos)
+    ${exceso ? `<div style="color:var(--red);margin-top:4px">⚠ Son más días hábiles que tus ${_pmCal.saldo} días de vacaciones disponibles.</div>` : ''}
+    <a href="#" onclick="pmCalReset();return false" style="margin-left:6px;font-size:12px">Limpiar</a>`;
 }
 
 // Saldo de vacaciones (desde Recursos Humanos de la Suite) al elegir "Vacaciones"
@@ -1653,6 +1749,7 @@ async function pmKioskVacaciones(){
     const d = await r.json();
     if (!r.ok) { box.innerHTML = `<span style="color:var(--red)">${d.error || 'No se pudo consultar el saldo'}</span>`; return; }
     const color = d.saldo < 0 ? 'var(--red)' : '#1f8a4c';
+    _pmCal.saldo = d.saldo; pmCalRender();
     box.innerHTML = `🏖 Días disponibles: <b style="font-size:16px;color:${color}">${d.saldo}</b>
       <div style="font-size:11px;color:var(--ink-soft);margin-top:2px">Ganados ${d.ganados} · gozados ${d.gozados}${d.pendientes ? ` · ${d.pendientes} en solicitudes por aprobar` : ''} · antigüedad ${d.anios} año(s)</div>`;
   } catch (e) { box.innerHTML = `<span style="color:var(--red)">Error de conexión: ${e.message}</span>`; }
@@ -2274,7 +2371,7 @@ function showPanel(id) {
   if (id === 'ubicaciones') setTimeout(initMap, 100);
   if (id === 'reportes') { populateFilterWorker(); loadReports(); }
   if (id === 'usuarios') { renderUsersTable().then(() => { loadSigners(); }); }
-  if (id === 'permisos') { pmKioskLoadStatus(); pmKioskVacaciones(); }
+  if (id === 'permisos') { pmKioskLoadStatus(); pmKioskVacaciones(); if (!_pmCal.ini) pmCalReset(); }
   if (id === 'ordenes-servicio') osKioskLoadList();
   if (id === 'tareas-asignadas') taKioskLoadList();
   if (id === 'notificaciones') loadNotifications();
