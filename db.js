@@ -68,6 +68,18 @@ CREATE TABLE IF NOT EXISTS kiosco_config (
   data       JSONB NOT NULL DEFAULT '{}'::jsonb,
   updated_at TIMESTAMP DEFAULT now()
 );
+-- v2.9: pausas / comida (solo viven en el kiosco; la Suite no las lee)
+CREATE TABLE IF NOT EXISTS kiosco_pausas (
+  id          VARCHAR PRIMARY KEY,
+  worker_tid  VARCHAR NOT NULL,
+  worker_name VARCHAR,
+  tipo        VARCHAR NOT NULL,          -- 'inicio' | 'fin'
+  ts          VARCHAR NOT NULL,          -- ISO UTC
+  entrada_id  VARCHAR,                   -- registro de entrada al que pertenece
+  data        JSONB NOT NULL DEFAULT '{}'::jsonb,
+  created_at  TIMESTAMP DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS ix_kiosco_pausas_worker_ts ON kiosco_pausas (worker_tid, ts);
 CREATE TABLE IF NOT EXISTS kiosco_dispositivos (
   id            VARCHAR PRIMARY KEY,
   worker_tid    VARCHAR NOT NULL,

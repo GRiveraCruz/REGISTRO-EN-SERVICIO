@@ -271,6 +271,9 @@
     .action-btn.entrada:hover { background: #006B46; transform: translateY(-2px); box-shadow: 0 6px 20px rgba(0,135,90,.3); }
     .action-btn.salida  { background: var(--red);   color: var(--white); }
     .action-btn.salida:hover  { background: var(--red-dark); transform: translateY(-2px); box-shadow: 0 6px 20px rgba(200,16,46,.3); }
+    .action-btn.pausa     { background: #d97706; color: var(--white); padding-top: 16px; padding-bottom: 16px; }
+    .action-btn.pausa-fin { background: #2563eb; color: var(--white); padding-top: 16px; padding-bottom: 16px; }
+    .action-btn.pausa .icon, .action-btn.pausa-fin .icon { font-size: clamp(20px, 4.5vw, 26px); }
     .action-btn:disabled { opacity: .45; cursor: not-allowed; transform: none !important; box-shadow: none !important; }
     .action-btn:active:not(:disabled) { transform: scale(.96) !important; }
 
@@ -708,7 +711,15 @@
         <button class="action-btn salida" id="btnSalida" onclick="registerRecord('salida')" disabled>
           <span class="icon">🔴</span> Registrar Salida
         </button>
+        <!-- v2.9: pausa / comida (solo dentro de la jornada) -->
+        <button class="action-btn pausa" id="btnPausaIni" onclick="registrarPausa('inicio')" disabled>
+          <span class="icon">☕</span> Iniciar pausa / comida
+        </button>
+        <button class="action-btn pausa-fin" id="btnPausaFin" onclick="registrarPausa('fin')" disabled>
+          <span class="icon">▶</span> Terminar pausa
+        </button>
       </div>
+      <div id="pausaHint" style="text-align:center;font-size:12px;color:#b45309;margin-top:-10px;margin-bottom:6px"></div>
       <div id="lastRecordHint" style="text-align:center;font-size:12px;color:var(--ink-soft);margin-top:8px"></div>
       <!-- v2.4: reloj + cardex del trabajador -->
       <div class="attendance-hero" style="margin-top:18px">
@@ -977,6 +988,22 @@
     </div>
 
     <!-- PANEL: Reportes -->
+    <div class="panel" id="panel-pausas">
+      <div class="page-header"><h2>☕ Pausas / Comida</h2><p>Registros de pausa de los trabajadores. Solo existen en el kiosco (la Suite no los ve) y no descuentan horas de la jornada.</p></div>
+      <div class="card">
+        <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:flex-end;margin-bottom:12px">
+          <div class="form-group" style="margin:0"><label>Desde</label><input type="date" id="pzDesde"></div>
+          <div class="form-group" style="margin:0"><label>Hasta</label><input type="date" id="pzHasta"></div>
+          <div class="form-group" style="margin:0;flex:1;min-width:200px"><label>Trabajador</label><select id="pzWorker"><option value="">Todos</option></select></div>
+          <button class="btn btn-primary btn-sm" onclick="cargarPausasAdmin()">Consultar</button>
+          <button class="btn btn-secondary btn-sm" onclick="exportarPausas()">⬇ Excel</button>
+        </div>
+        <div id="pzResumen" style="font-size:12px;color:var(--ink-soft);margin-bottom:8px"></div>
+        <div class="table-wrap"><table><thead><tr><th>Trabajador</th><th>Fecha</th><th>Inicio</th><th>Fin</th><th>Duración</th><th>Ubicación</th><th>Dispositivo</th></tr></thead>
+          <tbody id="pzBody"></tbody></table></div>
+      </div>
+    </div>
+
     <div class="panel" id="panel-dispositivos">
       <div class="page-header"><h2>📱 Dispositivos</h2><p>Con qué celular o equipo puede registrar asistencia cada trabajador</p></div>
       <div class="card" style="margin-bottom:16px">
@@ -2251,6 +2278,90 @@ async function accionDispositivo(id, accion, valor){
   toast('Listo', 'success'); cargarDispositivos();
 }
 
+// ═══ v2.9 — Pausa / comida ═══
+let _pausa = null;            // {jornada_abierta, abierta, inicio_ts}
+let _pausaSesion = false;     // ya marcó una pausa (inicio o fin) en esta sesión
+async function cargarEstadoPausa(){
+  _pausa = null;
+  if (!currentUser || currentUser.role !== 'worker') return;
+  try { _pausa = await (await fetch('/api/pausas/estado?workerId=' + encodeURIComponent(currentUser.id))).json(); } catch (e) { _pausa = null; }
+  actualizarBotonesPausa();
+}
+function actualizarBotonesPausa(){
+  const pi = document.getElementById('btnPausaIni'), pf = document.getElementById('btnPausaFin'), h = document.getElementById('pausaHint');
+  if (!pi || !pf) return;
+  const bloqueoDisp = _disp && (_disp.estado === 'pendiente' || _disp.estado === 'rechazado');
+  const enJornada = getLastRecordType() === 'entrada' && !(_registroSesion === 'salida');
+  const abierta = !!(_pausa && _pausa.abierta);
+  const fueraGeocerca = !(typeof _dentroGeocerca === 'undefined' ? true : _dentroGeocerca);
+  let ini = enJornada && !abierta, fin = enJornada && abierta, msg = '';
+  if (bloqueoDisp) { ini = fin = false; }
+  else if (!enJornada) msg = '';
+  else if (_registroSesion === 'entrada') { ini = fin = false; msg = 'Las pausas se registran en una nueva sesión, después de tu entrada.'; }
+  else if (_pausaSesion) { ini = fin = false; msg = 'Ya registraste un movimiento de pausa en esta sesión. Cierra sesión para el siguiente.'; }
+  else if (abierta) msg = `☕ Pausa en curso desde las ${new Date(_pausa.inicio_ts).toLocaleTimeString('es-MX', { hour: '2-digit', minute: '2-digit' })} — termínala antes de registrar tu salida.`;
+  if (fueraGeocerca) { ini = fin = false; }
+  pi.disabled = !ini; pf.disabled = !fin;
+  if (h) h.textContent = msg;
+  // con una pausa abierta no se puede checar salida
+  const bs = document.getElementById('btnSalida');
+  if (abierta && bs) {
+    bs.disabled = true;
+    const lh = document.getElementById('lastRecordHint'); if (lh && !bloqueoDisp) lh.textContent = '';
+  }
+}
+async function registrarPausa(tipo){
+  if (_pausaSesion) return toast('Ya registraste un movimiento de pausa en esta sesión.', 'error');
+  disableActionBtns();
+  const loc = getActiveLocation();
+  const body = { workerId: currentUser.id, workerName: currentUser.name, type: tipo, lat: currentLat, lng: currentLng,
+                 locationId: loc ? loc.id : null, locationName: loc ? loc.name : 'N/A', inGeofence: true,
+                 deviceId: obtenerDeviceId(), deviceInfo: infoDispositivo() };
+  try {
+    const r = await fetch('/api/pausas', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+    const d = await r.json();
+    if (r.ok) {
+      _pausa = d.estado; _pausaSesion = true;
+      toast(tipo === 'inicio' ? '⏸ Pausa iniciada' : '▶ Pausa terminada', 'success');
+    } else {
+      toast(d.error || 'No se pudo registrar la pausa', 'error');
+      if (d.estado) _pausa = d.estado;
+    }
+  } catch (e) { toast('Error de conexión: ' + e.message, 'error'); }
+  enableActionBtns();
+}
+
+let _pzFilas = [];
+async function cargarPausasAdmin(){
+  const hoy = new Date(); const iso = d => d.toISOString().slice(0, 10);
+  const de = document.getElementById('pzDesde'), ha = document.getElementById('pzHasta'), ws = document.getElementById('pzWorker');
+  if (!de.value) { const x = new Date(hoy); x.setDate(x.getDate() - 7); de.value = iso(x); }
+  if (!ha.value) ha.value = iso(hoy);
+  if (ws.options.length <= 1) {
+    try { if (!workers || !workers.length) await loadWorkers(); } catch (e) {}
+    ws.innerHTML = '<option value="">Todos</option>' + (workers || []).slice().sort((a, b) => (a.name || '').localeCompare(b.name || '')).map(w => `<option value="${w.id}">${w.name}</option>`).join('');
+  }
+  const q = new URLSearchParams({ from: de.value, to: ha.value }); if (ws.value) q.set('workerId', ws.value);
+  try { _pzFilas = (await (await fetch('/api/pausas?' + q)).json()).pausas || []; }
+  catch (e) { toast('No se pudieron cargar las pausas', 'error'); return; }
+  const hora = v => v ? new Date(v).toLocaleTimeString('es-MX', { hour: '2-digit', minute: '2-digit' }) : '—';
+  const fecha = v => v ? new Date(v).toLocaleDateString('es-MX', { weekday: 'short', day: '2-digit', month: 'short' }) : '—';
+  const dur = m => m == null ? '<span style="color:#b45309">abierta</span>' : (m >= 60 ? `${Math.floor(m / 60)} h ${m % 60} min` : `${m} min`);
+  document.getElementById('pzBody').innerHTML = _pzFilas.map(f => `<tr><td><strong>${f.nombre || f.worker_tid}</strong><div style="font-size:11px;color:var(--ink-soft)">${f.area || ''}</div></td>
+      <td>${fecha(f.inicio || f.fin)}</td><td>${hora(f.inicio)}</td><td>${f.fin ? hora(f.fin) : '<span style="color:#b45309">en curso</span>'}</td>
+      <td style="font-weight:600">${dur(f.minutos)}</td><td style="font-size:12px">${f.ubicacion || ''}</td><td style="font-size:12px">${({ movil: '📱 Celular', tablet: '📟 Tablet', computadora: '💻 Computadora' })[f.dispositivo] || f.dispositivo || ''}</td></tr>`).join('')
+    || '<tr><td colspan="7" style="text-align:center;color:var(--ink-soft);padding:24px">Sin pausas en el periodo</td></tr>';
+  const cerradas = _pzFilas.filter(f => f.minutos != null), tot = cerradas.reduce((a, f) => a + f.minutos, 0);
+  const porW = {}; cerradas.forEach(f => { porW[f.nombre] = (porW[f.nombre] || 0) + f.minutos; });
+  document.getElementById('pzResumen').innerHTML = `${_pzFilas.length} pausa(s) · ${_pzFilas.length - cerradas.length} abierta(s) · total ${Math.floor(tot / 60)} h ${tot % 60} min`
+    + (cerradas.length ? ` · promedio ${Math.round(tot / cerradas.length)} min por pausa` : '');
+}
+function exportarPausas(){
+  const q = new URLSearchParams({ from: document.getElementById('pzDesde').value, to: document.getElementById('pzHasta').value });
+  const w = document.getElementById('pzWorker').value; if (w) q.set('workerId', w);
+  window.open('/api/pausas/export?' + q, '_blank');
+}
+
 function mostrarLoginAdmin(si){
   document.getElementById('loginWorkerBox').style.display = si ? 'none' : '';
   document.getElementById('loginAdminBox').style.display = si ? '' : 'none';
@@ -2261,6 +2372,7 @@ function mostrarLoginAdmin(si){
 function logout() {
   currentUser = null;
   _registroSesion = null; detenerEspera();             // v2.3: la siguiente sesión empieza sin registro
+  _pausa = null; _pausaSesion = false;                  // v2.9
   stopClock(); stopGeo();
   document.getElementById('app').style.display = 'none';
   document.getElementById('loginScreen').style.display = 'flex';
@@ -2294,6 +2406,7 @@ async function startApp() {
   if (currentUser.role === 'worker') {
     _registroSesion = null; detenerEspera();
     await verificarDispositivoSesion();                   // v2.6
+    await cargarEstadoPausa();                            // v2.9
     try { ESPERA_MIN = (await (await fetch('/api/config/registro')).json()).espera_minutos ?? 5; } catch (e) {}
     // Pre-load this worker's records so entrada lookup works for job hours modal
     const r = await fetch(`/api/records?workerId=${currentUser.id}`);
@@ -2341,6 +2454,7 @@ function buildNav() {
       navItems.push({ id:'trabajadores', icon:'👷', label:'Trabajadores' });
     }
     navItems.push({ id:'dispositivos', icon:'📱', label:'Dispositivos' });   // v2.6
+    if (['admin','rrhh'].includes(currentUser.role)) navItems.push({ id:'pausas', icon:'☕', label:'Pausas' });   // v2.9: solo admin y RRHH
   }
 
   navItems.forEach(item => {
@@ -2376,6 +2490,7 @@ function showPanel(id) {
   if (id === 'tareas-asignadas') taKioskLoadList();
   if (id === 'notificaciones') loadNotifications();
   if (id === 'dispositivos') cargarDispositivos();
+  if (id === 'pausas') cargarPausasAdmin();
 }
 
 // ══════════════════════════════════════════════════════════════
@@ -2553,6 +2668,10 @@ function iniciarEspera(){
 }
 
 function enableActionBtns() {
+  _enableActionBtnsBase();
+  actualizarBotonesPausa();                                 // v2.9
+}
+function _enableActionBtnsBase() {
   const last = getLastRecordType();
   const btnE = document.getElementById('btnEntrada');
   const btnS = document.getElementById('btnSalida');
@@ -2594,6 +2713,8 @@ function enableActionBtns() {
 function disableActionBtns() {
   document.getElementById('btnEntrada').disabled = true;
   document.getElementById('btnSalida').disabled = true;
+  const pi = document.getElementById('btnPausaIni'), pf = document.getElementById('btnPausaFin');   // v2.9
+  if (pi) pi.disabled = true; if (pf) pf.disabled = true;
 }
 
 // ══════════════════════════════════════════════════════════════

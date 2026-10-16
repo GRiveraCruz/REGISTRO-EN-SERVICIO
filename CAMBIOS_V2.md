@@ -238,3 +238,56 @@ respaldo) y en el servidor solo como huella cifrada.
 - El envío no cambia (`fecha_inicio` / `fecha_fin`). Si falta el último día, se pide
   tocarlo.
 - **Por horas** sigue igual: un día con hora de inicio y fin.
+
+---
+
+# v2.9 — Pausa / comida
+
+## Para el trabajador
+- **Dos botones nuevos**, siempre visibles debajo de Entrada / Salida: **"☕ Iniciar pausa /
+  comida"** y **"▶ Terminar pausa"**.
+- **Cuándo se habilitan:**
+  - **solo después de checar Entrada y antes de checar Salida**;
+  - **se alternan**: sin pausa abierta solo "Iniciar pausa"; con pausa abierta solo
+    "Terminar pausa";
+  - con una pausa abierta, **"Registrar salida" queda deshabilitado** y se avisa: "☕ Pausa
+    en curso desde las HH:MM — termínala antes de registrar tu salida";
+  - igual que la entrada y la salida, requieren dispositivo autorizado y estar dentro de
+    la geocerca.
+- **Un movimiento por sesión:** las pausas no se marcan en la misma sesión en que se checó
+  la entrada, y solo una (inicio o fin) por sesión. La espera de 5 minutos entre registros
+  **no aplica** a las pausas.
+- **Las horas de la jornada no cambian:** la pausa no se descuenta.
+
+## Solo en el kiosco
+- **Tabla nueva `kiosco_pausas`** (se crea sola), separada de `kiosco_registros`. **La
+  Suite no la lee:** no aparece en Asistencia, KPIs, reportes ni en el cardex.
+- **El servidor también valida:**
+  - no hay pausa sin Entrada abierta;
+  - no se inicia una pausa si ya hay una abierta, ni se termina si no hay;
+  - no se checa Salida con una pausa abierta.
+  - Usa el mismo candado por trabajador que la entrada/salida.
+
+## Consulta (administrador y RRHH)
+- **Pestaña nueva "☕ Pausas"**, solo para los roles **admin** y **rrhh**:
+  - filtros por rango de fechas (por defecto, los últimos 7 días) y por trabajador;
+  - tabla con trabajador y área, fecha, inicio, fin, duración, ubicación y dispositivo.
+    Las pausas sin cerrar se marcan "en curso";
+  - resumen: número de pausas, abiertas, tiempo total y promedio por pausa;
+  - **"⬇ Excel"** con el mismo detalle.
+
+## API
+- `GET /api/pausas/estado?workerId=` · `POST /api/pausas` (`type`: inicio | fin)
+- `GET /api/pausas?from&to&workerId` · `GET /api/pausas/export?from&to&workerId`
+
+## Probado (PostgreSQL local)
+- **Pausa sin entrada** → rechazada. **Terminar sin pausa abierta** → rechazado.
+- **Iniciar dos veces** → rechazado. **Salida con pausa abierta** → rechazada.
+- **Terminar pausa y luego salida** → aceptada. **Pausa después de la salida** → rechazada.
+- **Los registros de asistencia** siguen teniendo solo entrada y salida.
+- **En pantalla:**
+  - sesión con entrada abierta → Salida e Iniciar pausa habilitados;
+  - tras iniciar → todo bloqueado hasta la siguiente sesión;
+  - siguiente sesión → solo "Terminar pausa", con Salida bloqueada;
+  - siguiente sesión → Salida e Iniciar pausa de nuevo.
+- **Nav de RRHH** con "Pausas", resumen y Excel correctos.

@@ -751,11 +751,105 @@ app.post('/api/records', aw(async (req, res) => {
                                       ultimo: { type: ult.tipo, timestamp: ult.ts } } };
       }
     }
+    // v2.9: no se puede checar salida con una pausa abierta
+    if (tipo === 'salida') {
+      const ep = await estadoPausa(c, workerId);
+      if (ep.abierta) return { status: 409, body: { error: 'Tienes una pausa/comida abierta: termínala antes de registrar tu salida.', pausa_abierta: true } };
+    }
     await c.query('INSERT INTO kiosco_registros (id, worker_tid, worker_name, tipo, ts, data) VALUES ($1,$2,$3,$4,$5,$6)',
                   [id, workerId, workerName, tipo, ts, JSON.stringify(b)]);
     return { status: 200, body: { success: true, record: { ...b, id, workerId, workerName, type: tipo, timestamp: ts } } };
   });
   res.status(resultado.status).json(resultado.body);
+}));
+
+// ─── PAUSAS / COMIDA (v2.9) ──────────────────────────────────────────────────
+// Solo viven en el kiosco (tabla kiosco_pausas); la Suite no las lee. Se pueden
+// registrar únicamente entre una Entrada y su Salida; se alternan inicio → fin; con una
+// pausa abierta no se puede checar Salida. No descuentan horas de la jornada.
+async function estadoPausa(c, workerId) {
+  const ent = (await c.query(`SELECT id, tipo, ts FROM kiosco_registros WHERE worker_tid = $1 ORDER BY ts DESC LIMIT 1`, [workerId])).rows[0];
+  if (!ent || ent.tipo !== 'entrada') return { jornada_abierta: false, abierta: false };
+  const ult = (await c.query(`SELECT * FROM kiosco_pausas WHERE worker_tid = $1 AND ts >= $2 ORDER BY ts DESC LIMIT 1`, [workerId, ent.ts])).rows[0];
+  const n = (await c.query(`SELECT count(*)::int AS n FROM kiosco_pausas WHERE worker_tid = $1 AND ts >= $2 AND tipo = 'inicio'`, [workerId, ent.ts])).rows[0].n;
+  return { jornada_abierta: true, entrada_id: ent.id, entrada_ts: ent.ts, abierta: !!(ult && ult.tipo === 'inicio'),
+           inicio_ts: ult && ult.tipo === 'inicio' ? ult.ts : null, pausas_en_jornada: n };
+}
+
+app.get('/api/pausas/estado', aw(async (req, res) => {
+  const workerId = String(req.query.workerId || '');
+  if (!workerId) return res.status(400).json({ error: 'Falta el trabajador' });
+  const c = await db.pool.connect();
+  try { res.json(await estadoPausa(c, workerId)); } finally { c.release(); }
+}));
+
+app.post('/api/pausas', aw(async (req, res) => {
+  const b = { ...req.body };
+  const workerId = String(b.workerId || ''), workerName = b.workerName || '', tipo = b.type || '';
+  if (!workerId) return res.status(400).json({ error: 'Falta identificar al trabajador' });
+  if (!['inicio', 'fin'].includes(tipo)) return res.status(400).json({ error: 'Tipo de pausa inválido' });
+  const ver = await verificarDispositivo(req, workerId, b.deviceId, b.deviceInfo);
+  if (ver.estado === 'pendiente' || ver.estado === 'rechazado')
+    return res.status(403).json({ error: ver.mensaje || 'Dispositivo no autorizado', dispositivo_estado: ver.estado });
+  const id = uuidv4(), ts = new Date().toISOString();
+  const resultado = await db.tx(async (c) => {
+    await c.query('SELECT pg_advisory_xact_lock(hashtext($1))', ['kiosco-registro:' + workerId]);   // mismo candado que entrada/salida
+    const ep = await estadoPausa(c, workerId);
+    if (!ep.jornada_abierta) return { status: 409, body: { error: 'Primero registra tu Entrada: la pausa solo se puede marcar dentro de la jornada.' } };
+    if (tipo === 'inicio' && ep.abierta) return { status: 409, body: { error: 'Ya tienes una pausa abierta: termínala primero.', estado: ep } };
+    if (tipo === 'fin' && !ep.abierta) return { status: 409, body: { error: 'No tienes una pausa abierta.', estado: ep } };
+    const data = { lat: b.lat ?? null, lng: b.lng ?? null, locationId: b.locationId || null, locationName: b.locationName || null,
+                   inGeofence: !!b.inGeofence, dispositivo: { tipo: ver.dispositivo.tipo, os: ver.dispositivo.os, navegador: ver.dispositivo.navegador } };
+    if (tipo === 'fin') data.inicio_ts = ep.inicio_ts;
+    await c.query('INSERT INTO kiosco_pausas (id, worker_tid, worker_name, tipo, ts, entrada_id, data) VALUES ($1,$2,$3,$4,$5,$6,$7)',
+                  [id, workerId, workerName, tipo, ts, ep.entrada_id, JSON.stringify(data)]);
+    return { status: 200, body: { success: true, pausa: { id, tipo, ts }, estado: await estadoPausa(c, workerId) } };
+  });
+  res.status(resultado.status).json(resultado.body);
+}));
+
+// Consulta (administrador / RRHH): pausas emparejadas inicio → fin, con duración
+async function listarPausas({ from, to, workerId }) {
+  const params = [], cond = [];
+  if (workerId) { params.push(workerId); cond.push(`p.worker_tid = $${params.length}`); }
+  if (from) { params.push(new Date(from + 'T00:00:00-06:00').toISOString()); cond.push(`p.ts >= $${params.length}`); }
+  if (to) { params.push(new Date(to + 'T23:59:59.999-06:00').toISOString()); cond.push(`p.ts <= $${params.length}`); }
+  const r = await db.q(`SELECT p.*, COALESCE(per.nombre, p.worker_name) AS nombre, per.area
+                        FROM kiosco_pausas p LEFT JOIN personal per ON per.tid = p.worker_tid
+                        ${cond.length ? 'WHERE ' + cond.join(' AND ') : ''} ORDER BY p.worker_tid, p.ts`, params);
+  const out = [], abiertas = {};
+  for (const x of r.rows) {
+    if (x.tipo === 'inicio') {
+      const fila = { worker_tid: x.worker_tid, nombre: x.nombre, area: x.area || '', inicio: x.ts, fin: null, minutos: null,
+                     ubicacion: (x.data || {}).locationName || '', dispositivo: ((x.data || {}).dispositivo || {}).tipo || '', inicio_id: x.id };
+      out.push(fila); abiertas[x.worker_tid] = fila;
+    } else {
+      const f = abiertas[x.worker_tid];
+      if (f && !f.fin) { f.fin = x.ts; f.minutos = Math.round((Date.parse(x.ts) - Date.parse(f.inicio)) / 60000); f.fin_id = x.id; delete abiertas[x.worker_tid]; }
+      else out.push({ worker_tid: x.worker_tid, nombre: x.nombre, area: x.area || '', inicio: (x.data || {}).inicio_ts || null, fin: x.ts,
+                      minutos: (x.data || {}).inicio_ts ? Math.round((Date.parse(x.ts) - Date.parse(x.data.inicio_ts)) / 60000) : null,
+                      ubicacion: (x.data || {}).locationName || '', dispositivo: ((x.data || {}).dispositivo || {}).tipo || '', fin_id: x.id });
+    }
+  }
+  return out.sort((a, b) => String(b.inicio || b.fin).localeCompare(String(a.inicio || a.fin)));
+}
+
+app.get('/api/pausas', aw(async (req, res) => {
+  res.json({ pausas: await listarPausas(req.query) });
+}));
+
+app.get('/api/pausas/export', aw(async (req, res) => {
+  const filas = await listarPausas(req.query);
+  const loc = (iso) => iso ? new Date(iso).toLocaleString('es-MX', { timeZone: TZ_LOCAL }) : '';
+  const ws = XLSX.utils.json_to_sheet(filas.map(f => ({
+    'Trabajador': f.nombre, 'ID': f.worker_tid, 'Área': f.area, 'Fecha': f.inicio ? new Date(f.inicio).toLocaleDateString('es-MX', { timeZone: TZ_LOCAL }) : '',
+    'Inicio': loc(f.inicio), 'Fin': f.fin ? loc(f.fin) : '(abierta)', 'Minutos': f.minutos ?? '', 'Ubicación': f.ubicacion, 'Dispositivo': f.dispositivo })));
+  ws['!cols'] = [{ wch: 34 }, { wch: 10 }, { wch: 20 }, { wch: 12 }, { wch: 22 }, { wch: 22 }, { wch: 9 }, { wch: 22 }, { wch: 12 }];
+  const wb = XLSX.utils.book_new(); XLSX.utils.book_append_sheet(wb, ws, 'Pausas');
+  const buf = XLSX.write(wb, { type: 'buffer', bookType: 'xlsx' });
+  res.setHeader('Content-Disposition', `attachment; filename="pausas_${req.query.from || ''}_${req.query.to || ''}.xlsx"`);
+  res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+  res.send(buf);
 }));
 
 // Completar un registro (horas por Job al salir) o edición del administrador
