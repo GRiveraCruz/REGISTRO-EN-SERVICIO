@@ -402,3 +402,24 @@ respaldo) y en el servidor solo como huella cifrada.
 - **Probado** con el flujo real, con el GPS lejos de cualquier geocerca:
   - entrada por nombre → "🏠 Modo Home office: tu ubicación no se valida…";
   - entrada con PIN → igual.
+
+---
+
+# v2.14 — "Home office" ahora se llama "Smart Work"
+
+- Todos los textos del kiosco cambian de **"Home office"** a **"Smart Work"**:
+  - la casilla en la ficha del trabajador ("🏠 Smart Work");
+  - la etiqueta en la lista de trabajadores;
+  - el aviso en la pantalla del trabajador ("Modo Smart Work: tu ubicación no se valida…");
+  - el mensaje cuando intenta registrar desde celular;
+  - la ubicación de los registros y pausas;
+  - el cardex;
+  - la columna "Dentro de Geocerca" del Excel/CSV.
+- **Registros anteriores:** al arrancar, los que decían "Home office" como ubicación se
+  renombran a "Smart Work" (registros y pausas), para que los reportes queden uniformes.
+- **El funcionamiento no cambia:** la ubicación no se valida y solo se registra desde
+  laptop o computadora.
+- Internamente el dato sigue llamándose `homeOffice`, así que la configuración de cada
+  trabajador se conserva sin hacer nada.
+- **Probado:** un registro anterior con "Home office" quedó como "Smart Work". El mensaje
+  desde celular, la ubicación de un registro nuevo y el cardex dicen "Smart Work".

@@ -1459,7 +1459,7 @@
     <div class="form-group">
       <label class="chk-plain" style="display:flex;gap:8px;align-items:flex-start;font-size:13px;padding:10px 12px;border:1.5px solid var(--border);border-radius:var(--r)">
         <input type="checkbox" id="wHomeOffice" onchange="document.getElementById('wLocationsBox').style.opacity=this.checked?'.45':'1'">
-        <span><b>🏠 Home office</b><br><span style="color:var(--ink-soft);font-size:12px">La ubicación no se toma en cuenta para registrar entrada, salida o pausas, pero <b>solo puede registrar desde su laptop o computadora</b> (no desde celular o tablet). El dispositivo autorizado se sigue validando.</span></span>
+        <span><b>🏠 Smart Work</b><br><span style="color:var(--ink-soft);font-size:12px">La ubicación no se toma en cuenta para registrar entrada, salida o pausas, pero <b>solo puede registrar desde su laptop o computadora</b> (no desde celular o tablet). El dispositivo autorizado se sigue validando.</span></span>
       </label>
     </div>
     <div class="form-group" id="wLocationsBox">
@@ -2684,10 +2684,10 @@ function esHomeOffice() {
 }
 function checkGeofence() {
   const status = document.getElementById('geoStatus');
-  // v2.10: Home office → la ubicación no se valida
+  // v2.10: Smart Work → la ubicación no se valida
   if (esHomeOffice()) {
     status.className = 'geo-status geo-ok';
-    status.innerHTML = '<span>🏠</span> Modo Home office: tu ubicación no se valida · registra desde tu laptop o computadora';
+    status.innerHTML = '<span>🏠</span> Modo Smart Work: tu ubicación no se valida · registra desde tu laptop o computadora';
     enableActionBtns(); return;
   }
   const loc = getActiveLocation();
@@ -3253,7 +3253,7 @@ function renderWorkersTable(filter='') {
           <td>${w.area ? `<span class="badge badge-green">${w.area}</span>` : '<span style="color:var(--ink-soft)">—</span>'}</td>
           <td>${jobsHtml}</td>
           <td>${w.shiftStart || '07:00'} – ${w.shiftEnd || '17:00'}</td>
-          <td>${w.homeOffice ? '<span class="badge badge-amber" title="No se valida la ubicación">🏠 Home office</span>' : getWorkerLocationNames(w)}</td>
+          <td>${w.homeOffice ? '<span class="badge badge-amber" title="No se valida la ubicación">🏠 Smart Work</span>' : getWorkerLocationNames(w)}</td>
           <td style="display:flex;gap:6px;">
             <button class="btn btn-secondary btn-sm" onclick="editWorker('${w.id}')">✏️ Editar</button>
 
@@ -3644,7 +3644,7 @@ function renderRecordsTable(recs) {
         <td>${r.baseHours != null ? r.baseHours+' h' : '—'}</td>
         <td>${r.extraHours != null ? r.extraHours+' h' : '—'}</td>
         <td>${r.locationName || '—'}</td>
-        <td>${r.homeOffice ? '<span class="badge badge-amber" title="Home office: no se valida la ubicación">🏠</span>' : `<span class="badge ${r.inGeofence?'badge-green':'badge-red'}">${r.inGeofence?'✓':'✗'}</span>`}</td>
+        <td>${r.homeOffice ? '<span class="badge badge-amber" title="Smart Work: no se valida la ubicación">🏠</span>' : `<span class="badge ${r.inGeofence?'badge-green':'badge-red'}">${r.inGeofence?'✓':'✗'}</span>`}</td>
         <td title="${r.dispositivo ? `${r.dispositivo.os} · ${r.dispositivo.navegador}${r.dispositivo.autorizado===false?' · sin control de dispositivo':''}` : 'Registro anterior al control de dispositivos'}">${r.dispositivo ? ({movil:'📱 Celular', tablet:'📟 Tablet', computadora:'💻 Computadora'}[r.dispositivo.tipo] || r.dispositivo.tipo) : '—'}</td>
         ${isAdmin ? `<td style="display:flex;gap:4px;"><button class="btn btn-secondary btn-sm" onclick="editRecord('${r.id}')">✏️</button><button class="btn btn-danger btn-sm" onclick="deleteRecord('${r.id}')">🗑</button></td>` : ''}
       </tr>`;
