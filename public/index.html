@@ -1442,6 +1442,12 @@
       </div>
     </div>
     <div class="form-group">
+      <label class="chk-plain" style="display:flex;gap:8px;align-items:flex-start;font-size:13px;padding:10px 12px;border:1.5px solid var(--border);border-radius:var(--r)">
+        <input type="checkbox" id="wHomeOffice" onchange="document.getElementById('wLocationsBox').style.opacity=this.checked?'.45':'1'">
+        <span><b>🏠 Home office</b><br><span style="color:var(--ink-soft);font-size:12px">La ubicación no se toma en cuenta para registrar entrada, salida o pausas, pero <b>solo puede registrar desde su laptop o computadora</b> (no desde celular o tablet). El dispositivo autorizado se sigue validando.</span></span>
+      </label>
+    </div>
+    <div class="form-group" id="wLocationsBox">
       <label>Puntos de registro asignados</label>
       <div id="wLocationsCheckboxes" style="border:1.5px solid var(--border);border-radius:var(--r);padding:10px 14px;max-height:160px;overflow-y:auto;display:flex;flex-direction:column;gap:8px;">
         <span style="color:var(--ink-soft);font-size:12px;">Sin ubicaciones configuradas</span>
@@ -2518,6 +2524,10 @@ function stopGeo() { clearInterval(geoInterval); }
 
 function checkGeo() {
   const status = document.getElementById('geoStatus');
+  if (currentUser && currentUser.role === 'worker' && currentUser.homeOffice) {   // v2.10: no se pide la ubicación
+    if (navigator.geolocation) navigator.geolocation.getCurrentPosition(p => { currentLat = p.coords.latitude; currentLng = p.coords.longitude; }, () => {}, { timeout: 8000 });
+    return checkGeofence();
+  }
   status.className = 'geo-status geo-checking';
   status.innerHTML = '<span>📡</span> Verificando ubicación…';
   if (!navigator.geolocation) {
@@ -2611,6 +2621,12 @@ function getActiveLocation() {
 
 function checkGeofence() {
   const status = document.getElementById('geoStatus');
+  // v2.10: Home office → la ubicación no se valida
+  if (currentUser && currentUser.role === 'worker' && currentUser.homeOffice) {
+    status.className = 'geo-status geo-ok';
+    status.innerHTML = '<span>🏠</span> Modo Home office: tu ubicación no se valida · registra desde tu laptop o computadora';
+    enableActionBtns(); return;
+  }
   const loc = getActiveLocation();
 
   if (!loc) {
@@ -3174,7 +3190,7 @@ function renderWorkersTable(filter='') {
           <td>${w.area ? `<span class="badge badge-green">${w.area}</span>` : '<span style="color:var(--ink-soft)">—</span>'}</td>
           <td>${jobsHtml}</td>
           <td>${w.shiftStart || '07:00'} – ${w.shiftEnd || '17:00'}</td>
-          <td>${getWorkerLocationNames(w)}</td>
+          <td>${w.homeOffice ? '<span class="badge badge-amber" title="No se valida la ubicación">🏠 Home office</span>' : getWorkerLocationNames(w)}</td>
           <td style="display:flex;gap:6px;">
             <button class="btn btn-secondary btn-sm" onclick="editWorker('${w.id}')">✏️ Editar</button>
 
@@ -3239,6 +3255,8 @@ function editWorker(id) {
   document.getElementById('wAllowedJobs').value = (w.allowedJobs || []).join(', ');
   document.getElementById('wShiftStart').value = w.shiftStart || '07:00';
   document.getElementById('wShiftEnd').value = w.shiftEnd || '17:00';
+  document.getElementById('wHomeOffice').checked = !!w.homeOffice;                       // v2.10
+  document.getElementById('wLocationsBox').style.opacity = w.homeOffice ? '.45' : '1';
   const selected = w.locationIds || (w.locationId ? [w.locationId] : []);
   renderLocationCheckboxes(selected);
   document.getElementById('wPinSection').style.display = '';
@@ -3307,7 +3325,8 @@ async function saveWorker() {
     shiftStart: document.getElementById('wShiftStart').value,
     shiftEnd: document.getElementById('wShiftEnd').value,
     locationIds,
-    locationId: locationIds[0] || ''
+    locationId: locationIds[0] || '',
+    homeOffice: document.getElementById('wHomeOffice').checked                      // v2.10
   };
   if (!id) return toast('Los trabajadores se dan de alta en Persico Suite (Control de Personal)', 'error');
   const url = `/api/workers/${id}`;
@@ -3562,7 +3581,7 @@ function renderRecordsTable(recs) {
         <td>${r.baseHours != null ? r.baseHours+' h' : '—'}</td>
         <td>${r.extraHours != null ? r.extraHours+' h' : '—'}</td>
         <td>${r.locationName || '—'}</td>
-        <td><span class="badge ${r.inGeofence?'badge-green':'badge-red'}">${r.inGeofence?'✓':'✗'}</span></td>
+        <td>${r.homeOffice ? '<span class="badge badge-amber" title="Home office: no se valida la ubicación">🏠</span>' : `<span class="badge ${r.inGeofence?'badge-green':'badge-red'}">${r.inGeofence?'✓':'✗'}</span>`}</td>
         <td title="${r.dispositivo ? `${r.dispositivo.os} · ${r.dispositivo.navegador}${r.dispositivo.autorizado===false?' · sin control de dispositivo':''}` : 'Registro anterior al control de dispositivos'}">${r.dispositivo ? ({movil:'📱 Celular', tablet:'📟 Tablet', computadora:'💻 Computadora'}[r.dispositivo.tipo] || r.dispositivo.tipo) : '—'}</td>
         ${isAdmin ? `<td style="display:flex;gap:4px;"><button class="btn btn-secondary btn-sm" onclick="editRecord('${r.id}')">✏️</button><button class="btn btn-danger btn-sm" onclick="deleteRecord('${r.id}')">🗑</button></td>` : ''}
       </tr>`;

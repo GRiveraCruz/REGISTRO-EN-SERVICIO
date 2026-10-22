@@ -291,3 +291,63 @@ respaldo) y en el servidor solo como huella cifrada.
   - siguiente sesión → solo "Terminar pausa", con Salida bloqueada;
   - siguiente sesión → Salida e Iniciar pausa de nuevo.
 - **Nav de RRHH** con "Pausas", resumen y Excel correctos.
+
+---
+
+# v2.10 — Modo "Home office" por trabajador
+
+- **Opción nueva en Trabajadores ▸ Editar:** casilla **"🏠 Home office"**.
+  - Con la casilla marcada, **la ubicación no se toma en cuenta** para registrar entrada,
+    salida o pausas: el trabajador puede registrar desde cualquier lugar.
+  - Los puntos de registro asignados quedan atenuados, porque no aplican. Se conservan por
+    si se quita el modo.
+  - **El dispositivo autorizado sí se sigue validando**, igual que las demás reglas: un
+    registro por sesión, espera entre registros y salida bloqueada con una pausa abierta.
+- **Lista de trabajadores:** en lugar de sus ubicaciones muestra la etiqueta "🏠 Home
+  office".
+- **Pantalla del trabajador:**
+  - en lugar de "Verificando ubicación…" aparece "🏠 Modo Home office: tu ubicación no se
+    valida para el registro";
+  - los botones se habilitan sin esperar al GPS;
+  - si el teléfono da su ubicación se guarda como referencia, pero no es obligatoria.
+- **Registros:**
+  - el servidor marca el registro como Home office según la configuración del trabajador,
+    sin confiar en lo que mande el navegador: ubicación "Home office" y `homeOffice: true`;
+  - en **Reportes**, la columna Geocerca muestra 🏠;
+  - en el Excel/CSV aparece "Home office" en "Dentro de Geocerca";
+  - también aplica a las pausas.
+- **Cardex del trabajador:** "Ubicaciones permitidas" muestra "🏠 Home office".
+
+## Probado
+- **Trabajador con Home office** y el GPS lejos de cualquier geocerca:
+  - aparece el aviso de Home office y se habilitan Salida e Iniciar pausa;
+  - su registro quedó con ubicación "Home office" y `inGeofence` en falso, aunque el
+    navegador mandó "Planta".
+- **Trabajador sin Home office** en el mismo lugar → bloqueado como siempre.
+- **Cardex** → "🏠 Home office".
+
+---
+
+# v2.11 — Home office: solo desde laptop o computadora
+
+- Un trabajador en **modo Home office** solo puede registrar entrada, salida y pausas desde
+  una **laptop o computadora**. Desde celular o tablet se rechaza.
+  - Se valida en el **servidor**, no solo en pantalla.
+  - En la pantalla del trabajador aparece "⛔ Dispositivo no permitido · Estás en modo Home
+    office: la asistencia solo se registra desde tu laptop o computadora (este dispositivo
+    es celular)" y los botones se bloquean.
+- La regla general **"Solo desde celular o tablet"** (Dispositivos ▸ Reglas) **no aplica** a
+  quien está en Home office: para ellos manda la regla de computadora.
+- **Se sigue aplicando el control de dispositivos:** la computadora debe estar autorizada.
+  Puede ser la primera computadora del trabajador (se autoriza sola, si esa regla está
+  activa) o una que autorice RH.
+- El texto de la casilla "🏠 Home office" en la ficha del trabajador y el aviso de la
+  pantalla mencionan la regla.
+
+## Probado
+- **Trabajador en Home office:**
+  - desde celular, la entrada y la pausa se rechazan con el mensaje;
+  - desde su computadora autorizada, la entrada se acepta con ubicación "Home office";
+  - con "solo celular" activo, su computadora sigue aceptada.
+- **Trabajador sin Home office** con "solo celular" activo → computadora rechazada, como
+  antes.

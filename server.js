@@ -66,6 +66,7 @@ function filaATrabajador(r) {
     allowedJobs: cfg.allowedJobs || [],
     locationIds: cfg.locationIds || (cfg.locationId ? [cfg.locationId] : []),
     locationId: (cfg.locationIds || [])[0] || cfg.locationId || '',
+    homeOffice: !!cfg.homeOffice,                     // v2.10: no se valida la ubicación
     pin: r.pin_hash ? true : undefined,
   };
 }
@@ -156,6 +157,7 @@ app.put('/api/workers/:id', aw(async (req, res) => {
   const b = req.body || {};
   const cambios = {};
   for (const k of ['shiftStart', 'shiftEnd', 'allowedJobs', 'locationIds']) if (k in b) cambios[k] = b[k];
+  if ('homeOffice' in b) cambios.homeOffice = !!b.homeOffice;          // v2.10
   if ('locationIds' in b) cambios.locationId = (b.locationIds || [])[0] || '';
   await guardarCfgTrabajador(w.id, cambios);
   res.json({ success: true, worker: await trabajadorPorId(w.id) });
@@ -255,6 +257,7 @@ app.get('/api/workers/:id/cardex', aw(async (req, res) => {
   const locs = (await db.q('SELECT id, data FROM kiosco_ubicaciones ORDER BY created_at')).rows;
   const ids = (w && w.locationIds) || [];
   const ubicaciones = (ids.length ? locs.filter(l => ids.includes(l.id)) : locs).map(l => l.data.name || l.id);
+  const homeOffice = !!(w && w.homeOffice);                                   // v2.10
   // v2.5: jefe directo y subordinados (Control de Personal: campo jefe_directo = tid del jefe)
   let jefe = null;
   if (d.jefe_directo) {
@@ -278,7 +281,7 @@ app.get('/api/workers/:id/cardex', aw(async (req, res) => {
     horario, vacaciones, jefe_directo: jefe, subordinados: subs.length, subordinados_nombres: subs.slice(0, 30),
     semana_actual: { desde: iso(lunes.esta), ...semana(iso(lunes.esta)), en_curso: enCurso },
     semana_pasada: { desde: iso(lunes.pasada), ...semana(iso(lunes.pasada)) },
-    ubicaciones, todas_las_ubicaciones: !ids.length,
+    ubicaciones: homeOffice ? ['🏠 Home office'] : ubicaciones, todas_las_ubicaciones: !ids.length && !homeOffice, home_office: homeOffice,
   });
 }));
 
@@ -325,7 +328,13 @@ const SQL_CAT = `COALESCE(data->>'categoria', CASE WHEN data->'primero'->>'tipo'
 async function verificarDispositivo(req, workerId, deviceId, info) {
   const cfg = await cfgDispositivos();
   const disp = clasificar(req, info);
-  if (cfg.solo_movil && disp.tipo === 'computadora')
+  // v2.11: en Home office solo se registra desde una computadora (y la regla "solo celular" no aplica)
+  const wHO = await trabajadorPorId(workerId);
+  if (wHO && wHO.homeOffice) {
+    if (disp.tipo !== 'computadora')
+      return { estado: 'rechazado', motivo: 'home_office_solo_computadora', dispositivo: disp, home_office: true,
+               mensaje: `Estás en modo Home office: la asistencia solo se registra desde tu laptop o computadora (este dispositivo es ${NOMBRE_TIPO[disp.tipo].toLowerCase()}).` };
+  } else if (cfg.solo_movil && disp.tipo === 'computadora')
     return { estado: 'rechazado', motivo: 'solo_movil', dispositivo: disp,
              mensaje: 'Los registros de asistencia solo se pueden hacer desde un celular o tablet.' };
   if (!cfg.control_activo) return { estado: 'sin_control', dispositivo: disp };
@@ -735,6 +744,8 @@ app.post('/api/records', aw(async (req, res) => {
   if (ver.estado === 'pendiente' || ver.estado === 'rechazado')
     return res.status(403).json({ error: ver.mensaje || 'Dispositivo no autorizado', dispositivo_estado: ver.estado });
   b.dispositivo = { tipo: ver.dispositivo.tipo, os: ver.dispositivo.os, navegador: ver.dispositivo.navegador, autorizado: ver.estado === 'autorizado' };
+  // v2.10: trabajador en Home office → el registro se marca así (la ubicación no se valida)
+  { const wHO = await trabajadorPorId(workerId); b.homeOffice = !!(wHO && wHO.homeOffice); if (b.homeOffice) { b.inGeofence = false; b.locationName = 'Home office'; b.locationId = null; } }
   const resultado = await db.tx(async (c) => {
     await c.query('SELECT pg_advisory_xact_lock(hashtext($1))', ['kiosco-registro:' + workerId]);
     const ult = (await c.query('SELECT tipo, ts FROM kiosco_registros WHERE worker_tid = $1 ORDER BY ts DESC LIMIT 1', [workerId])).rows[0];
@@ -800,6 +811,7 @@ app.post('/api/pausas', aw(async (req, res) => {
     if (tipo === 'fin' && !ep.abierta) return { status: 409, body: { error: 'No tienes una pausa abierta.', estado: ep } };
     const data = { lat: b.lat ?? null, lng: b.lng ?? null, locationId: b.locationId || null, locationName: b.locationName || null,
                    inGeofence: !!b.inGeofence, dispositivo: { tipo: ver.dispositivo.tipo, os: ver.dispositivo.os, navegador: ver.dispositivo.navegador } };
+    { const wHO = await trabajadorPorId(workerId); if (wHO && wHO.homeOffice) { data.homeOffice = true; data.inGeofence = false; data.locationName = 'Home office'; data.locationId = null; } }   // v2.10
     if (tipo === 'fin') data.inicio_ts = ep.inicio_ts;
     await c.query('INSERT INTO kiosco_pausas (id, worker_tid, worker_name, tipo, ts, entrada_id, data) VALUES ($1,$2,$3,$4,$5,$6,$7)',
                   [id, workerId, workerName, tipo, ts, ep.entrada_id, JSON.stringify(data)]);
@@ -897,7 +909,7 @@ app.get('/api/records/export', aw(async (req, res) => {
       'Ubicación': r.locationName || '',
       'Lat': r.lat || '',
       'Lng': r.lng || '',
-      'Dentro de Geocerca': r.inGeofence ? 'Sí' : 'No'
+      'Dentro de Geocerca': r.homeOffice ? 'Home office' : (r.inGeofence ? 'Sí' : 'No')
     };
   });
   if (format === 'csv') {
