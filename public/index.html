@@ -988,6 +988,21 @@
     </div>
 
     <!-- PANEL: Reportes -->
+    <div class="panel" id="panel-contingencia">
+      <div class="page-header"><h2>📥 Importar registros de contingencia</h2><p>Registros capturados en el kiosco de contingencia (desde casa) mientras este kiosco no estuvo disponible.</p></div>
+      <div class="card">
+        <ol style="font-size:13px;color:var(--ink-soft);line-height:1.6;margin:0 0 12px 18px;padding:0">
+          <li>En el kiosco de contingencia entra a <b>/admin.html</b> y descarga el <b>CSV para el kiosco</b>.</li>
+          <li>Súbelo aquí y revisa que cada nombre corresponda al trabajador correcto (puedes corregirlo).</li>
+          <li>Pulsa <b>Importar</b>. Los registros que ya se habían importado no se duplican.</li>
+        </ol>
+        <input type="file" id="ctgFile" accept=".csv,text/csv" onchange="ctgCargar(this)">
+        <div id="ctgResumen" style="font-size:12px;margin:10px 0"></div>
+        <div id="ctgVista"></div>
+        <button class="btn btn-primary" id="ctgBtn" style="display:none;margin-top:10px" onclick="ctgImportar()">Importar</button>
+      </div>
+    </div>
+
     <div class="panel" id="panel-pausas">
       <div class="page-header"><h2>☕ Pausas / Comida</h2><p>Registros de pausa de los trabajadores. Solo existen en el kiosco (la Suite no los ve) y no descuentan horas de la jornada.</p></div>
       <div class="card">
@@ -1584,6 +1599,7 @@ async function doWorkerLoginByPin(){
       id: worker.id, name: worker.name, role: 'worker', position: worker.position,
       area: worker.area || '', allowedJobs: worker.allowedJobs || [], locationIds,
       shiftStart: worker.shiftStart, shiftEnd: worker.shiftEnd,
+      homeOffice: !!worker.homeOffice,                     // v2.13: faltaba (el modo no se aplicaba)
     };
     document.getElementById('workerPinInput').value = '';
     closeWorkerLogin();
@@ -1638,7 +1654,8 @@ async function doWorkerLogin() {
     allowedJobs: worker.allowedJobs || [],
     locationIds,
     shiftStart: worker.shiftStart,
-    shiftEnd: worker.shiftEnd
+    shiftEnd: worker.shiftEnd,
+    homeOffice: !!worker.homeOffice                        // v2.13: faltaba (el modo no se aplicaba)
   };
 
   closeWorkerLogin();
@@ -2368,6 +2385,44 @@ function exportarPausas(){
   window.open('/api/pausas/export?' + q, '_blank');
 }
 
+// ═══ v2.12 — Importar registros del kiosco de contingencia ═══
+let _ctg = { csv: '', datos: null, mapeo: {} };
+async function ctgCargar(input){
+  const f = input.files[0]; if (!f) return;
+  _ctg = { csv: await f.text(), datos: null, mapeo: {} };
+  await ctgPrevia();
+}
+async function ctgPrevia(){
+  const r = await fetch('/api/contingencia/importar', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ csv: _ctg.csv, mapeo: _ctg.mapeo }) });
+  const d = await r.json();
+  if (!r.ok) { toast(d.error || 'No se pudo leer el archivo', 'error'); return; }
+  _ctg.datos = d;
+  const opts = (sel) => '<option value="">— Sin relacionar (no se importa) —</option>' + d.trabajadores.map(w => `<option value="${w.id}" ${sel===w.id?'selected':''}>${w.name}</option>`).join('');
+  const nombres = Object.keys(d.nombres);
+  const v = d.vista, nuevos = v.filter(x => x.valido && x.trabajador && !x.duplicado).length;
+  document.getElementById('ctgResumen').innerHTML = `<b>${v.length}</b> registro(s) en el archivo · <b style="color:#1f8a4c">${nuevos} por importar</b> · ${v.filter(x=>x.duplicado).length} ya importados · ${v.filter(x=>!x.trabajador).length} sin trabajador`;
+  document.getElementById('ctgVista').innerHTML = `<div style="font-weight:700;font-size:13px;margin:6px 0">Nombres del archivo → trabajador</div>
+    <div class="table-wrap"><table><thead><tr><th>Nombre en el archivo</th><th>Trabajador</th><th>Registros</th></tr></thead><tbody>
+    ${nombres.map(n => `<tr><td><strong>${n}</strong></td><td><select onchange="_ctg.mapeo['${n.replace(/'/g,"\\'")}']=this.value; ctgPrevia()">${opts((d.nombres[n]||{}).id)}</select>
+      ${d.nombres[n] ? '' : '<div style="font-size:11px;color:var(--red)">No se encontró automáticamente</div>'}</td><td>${v.filter(x=>x.nombre===n).length}</td></tr>`).join('')}
+    </tbody></table></div>
+    <div style="font-weight:700;font-size:13px;margin:12px 0 6px">Registros</div>
+    <div class="table-wrap" style="max-height:320px;overflow:auto"><table><thead><tr><th>Fecha y hora</th><th>Nombre</th><th>Tipo</th><th>Estado</th></tr></thead><tbody>
+    ${v.map(x => `<tr><td>${new Date(x.ts).toLocaleString('es-MX')}</td><td>${x.nombre}</td><td>${x.tipo==='entrada'?'🟢 Entrada':'🔴 Salida'}</td>
+      <td>${!x.valido?'<span style="color:var(--red)">inválido</span>':x.duplicado?'<span style="color:var(--ink-soft)">ya importado</span>':!x.trabajador?'<span style="color:var(--red)">sin trabajador</span>':'<span style="color:#1f8a4c">se importará</span>'}</td></tr>`).join('')}
+    </tbody></table></div>`;
+  document.getElementById('ctgBtn').style.display = nuevos ? '' : 'none';
+  document.getElementById('ctgBtn').textContent = `Importar ${nuevos} registro(s)`;
+}
+async function ctgImportar(){
+  if (!confirm('Se agregarán los registros al historial de asistencia (marcados como "Contingencia"). ¿Continuar?')) return;
+  const r = await fetch('/api/contingencia/importar', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ csv: _ctg.csv, mapeo: _ctg.mapeo, aplicar: true }) });
+  const d = await r.json();
+  if (!r.ok) { toast(d.error || 'No se pudo importar', 'error'); return; }
+  toast(`✓ ${d.importados} registro(s) importados` + (d.omitidos ? ` · ${d.omitidos} omitidos` : ''), 'success');
+  await ctgPrevia();
+}
+
 function mostrarLoginAdmin(si){
   document.getElementById('loginWorkerBox').style.display = si ? 'none' : '';
   document.getElementById('loginAdminBox').style.display = si ? '' : 'none';
@@ -2461,6 +2516,7 @@ function buildNav() {
     }
     navItems.push({ id:'dispositivos', icon:'📱', label:'Dispositivos' });   // v2.6
     if (['admin','rrhh'].includes(currentUser.role)) navItems.push({ id:'pausas', icon:'☕', label:'Pausas' });   // v2.9: solo admin y RRHH
+    if (['admin','rrhh'].includes(currentUser.role)) navItems.push({ id:'contingencia', icon:'📥', label:'Contingencia' });   // v2.12
   }
 
   navItems.forEach(item => {
@@ -2497,6 +2553,7 @@ function showPanel(id) {
   if (id === 'notificaciones') loadNotifications();
   if (id === 'dispositivos') cargarDispositivos();
   if (id === 'pausas') cargarPausasAdmin();
+  if (id === 'contingencia') { document.getElementById('ctgVista').innerHTML = ''; document.getElementById('ctgBtn').style.display = 'none'; }
 }
 
 // ══════════════════════════════════════════════════════════════
@@ -2524,7 +2581,7 @@ function stopGeo() { clearInterval(geoInterval); }
 
 function checkGeo() {
   const status = document.getElementById('geoStatus');
-  if (currentUser && currentUser.role === 'worker' && currentUser.homeOffice) {   // v2.10: no se pide la ubicación
+  if (esHomeOffice()) {   // v2.10: no se pide la ubicación
     if (navigator.geolocation) navigator.geolocation.getCurrentPosition(p => { currentLat = p.coords.latitude; currentLng = p.coords.longitude; }, () => {}, { timeout: 8000 });
     return checkGeofence();
   }
@@ -2619,10 +2676,16 @@ function getActiveLocation() {
   return null; // multiple → user must select
 }
 
+function esHomeOffice() {
+  if (!currentUser || currentUser.role !== 'worker') return false;
+  if (currentUser.homeOffice) return true;
+  const w = (typeof workers !== 'undefined' && workers || []).find(x => x.id === currentUser.id);
+  return !!(w && w.homeOffice);
+}
 function checkGeofence() {
   const status = document.getElementById('geoStatus');
   // v2.10: Home office → la ubicación no se valida
-  if (currentUser && currentUser.role === 'worker' && currentUser.homeOffice) {
+  if (esHomeOffice()) {
     status.className = 'geo-status geo-ok';
     status.innerHTML = '<span>🏠</span> Modo Home office: tu ubicación no se valida · registra desde tu laptop o computadora';
     enableActionBtns(); return;

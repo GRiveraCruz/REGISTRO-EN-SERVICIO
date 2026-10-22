@@ -864,6 +864,82 @@ app.get('/api/pausas/export', aw(async (req, res) => {
   res.send(buf);
 }));
 
+// ─── IMPORTAR REGISTROS DEL KIOSCO DE CONTINGENCIA (v2.12) ───────────────────
+// CSV descargado del kiosco de contingencia (id, nombre, tipo, fecha_hora_utc, …).
+// Se relaciona cada nombre con un trabajador de Control de Personal; las salidas calculan
+// sus horas contra la entrada anterior (como el kiosco). No se duplica: cada renglón guarda
+// su id de contingencia.
+function csvParse(txt) {
+  const filas = []; let fila = [], campo = '', q = false;
+  txt = String(txt || '').replace(/^\ufeff/, '');
+  for (let i = 0; i < txt.length; i++) {
+    const ch = txt[i];
+    if (q) { if (ch === '"') { if (txt[i + 1] === '"') { campo += '"'; i++; } else q = false; } else campo += ch; }
+    else if (ch === '"') q = true;
+    else if (ch === ',') { fila.push(campo); campo = ''; }
+    else if (ch === '\n' || ch === '\r') { if (ch === '\r' && txt[i + 1] === '\n') i++; fila.push(campo); filas.push(fila); fila = []; campo = ''; }
+    else campo += ch;
+  }
+  if (campo !== '' || fila.length) { fila.push(campo); filas.push(fila); }
+  const enc = (filas.shift() || []).map(h => h.trim().toLowerCase());
+  return filas.filter(f => f.some(v => v.trim())).map(f => Object.fromEntries(enc.map((h, i) => [h, (f[i] || '').trim()])));
+}
+const normNombre = (v) => String(v || '').normalize('NFD').replace(/[\u0300-\u036f]/g, '').toUpperCase().replace(/[^A-Z ]/g, ' ').split(/\s+/).filter(Boolean);
+function horasSalida(entradaIso, salidaIso) {
+  const diff = Date.parse(salidaIso) - Date.parse(entradaIso);
+  if (!(diff > 0 && diff < 36 * 3600000)) return { totalHours: diff <= 0 ? 0 : null, baseHours: diff <= 0 ? 0 : null, extraHours: diff <= 0 ? 0 : null };
+  const total = Math.round(diff / 36000) / 100;
+  const dow = new Date(new Date(entradaIso).toLocaleString('en-US', { timeZone: TZ_LOCAL })).getDay();
+  const lim = dow >= 1 && dow <= 4 ? 10 : dow === 5 ? 8 : 0;
+  return dow === 0 || dow === 6 ? { totalHours: total, baseHours: 0, extraHours: total }
+                                : { totalHours: total, baseHours: Math.min(total, lim), extraHours: Math.max(0, Math.round((total - lim) * 100) / 100) };
+}
+
+app.post('/api/contingencia/importar', aw(async (req, res) => {
+  const { csv, aplicar, mapeo } = req.body || {};
+  const filas = csvParse(csv);
+  if (!filas.length) return res.status(400).json({ error: 'El archivo no tiene registros' });
+  if (!('nombre' in filas[0]) || !('tipo' in filas[0]) || !('fecha_hora_utc' in filas[0]))
+    return res.status(400).json({ error: 'No es el CSV del kiosco de contingencia (faltan las columnas nombre, tipo, fecha_hora_utc)' });
+  const trab = await listarTrabajadores();
+  const porNombre = {};
+  for (const n of [...new Set(filas.map(f => f.nombre.toUpperCase()))]) {
+    if (mapeo && mapeo[n]) { porNombre[n] = trab.find(w => w.id === mapeo[n]) || null; continue; }
+    const t = normNombre(n), tk = t.join(' ');
+    let w = trab.find(x => normNombre(x.name).join(' ') === tk)
+         || trab.find(x => { const xs = new Set(normNombre(x.name)); return t.length >= 2 && t.every(p => xs.has(p)); });
+    porNombre[n] = w || null;
+  }
+  const ya = new Set((await db.q(`SELECT data->>'contingencia_id' AS cid FROM kiosco_registros WHERE data ? 'contingencia_id'`)).rows.map(r => r.cid));
+  const vista = filas.map(f => ({ id: f.id, nombre: f.nombre.toUpperCase(), tipo: f.tipo, ts: f.fecha_hora_utc, lat: f.lat, lng: f.lng, dispositivo: f.dispositivo,
+                                  trabajador: porNombre[f.nombre.toUpperCase()] ? { id: porNombre[f.nombre.toUpperCase()].id, name: porNombre[f.nombre.toUpperCase()].name } : null,
+                                  duplicado: ya.has(f.id), valido: ['entrada', 'salida'].includes(f.tipo) && !isNaN(Date.parse(f.fecha_hora_utc)) }));
+  if (!aplicar) return res.json({ vista, nombres: Object.fromEntries(Object.entries(porNombre).map(([k, w]) => [k, w ? { id: w.id, name: w.name } : null])),
+                                  trabajadores: trab.map(w => ({ id: w.id, name: w.name })) });
+  const aInsertar = vista.filter(v => v.valido && v.trabajador && !v.duplicado).sort((a, b) => a.ts.localeCompare(b.ts));
+  let n = 0;
+  await db.tx(async (c) => {
+    for (const v of aInsertar) {
+      await c.query('SELECT pg_advisory_xact_lock(hashtext($1))', ['kiosco-registro:' + v.trabajador.id]);
+      let horas = {};
+      if (v.tipo === 'salida') {
+        const ent = (await c.query(`SELECT ts FROM kiosco_registros WHERE worker_tid = $1 AND ts < $2 ORDER BY ts DESC LIMIT 1`, [v.trabajador.id, v.ts])).rows[0];
+        const entTipo = ent ? (await c.query(`SELECT tipo FROM kiosco_registros WHERE worker_tid = $1 AND ts = $2 LIMIT 1`, [v.trabajador.id, ent.ts])).rows[0].tipo : null;
+        if (ent && entTipo === 'entrada') horas = horasSalida(ent.ts, v.ts);
+      }
+      const data = { workerId: v.trabajador.id, workerName: v.trabajador.name, type: v.tipo, timestamp: v.ts,
+                     lat: v.lat ? Number(v.lat) : null, lng: v.lng ? Number(v.lng) : null, locationId: null, locationName: 'Contingencia (desde casa)',
+                     inGeofence: false, homeOffice: true, origen: 'contingencia', contingencia_id: v.id,
+                     dispositivo: { tipo: v.dispositivo || '', os: '', navegador: '', autorizado: false }, ...horas };
+      await c.query('INSERT INTO kiosco_registros (id, worker_tid, worker_name, tipo, ts, data) VALUES ($1,$2,$3,$4,$5,$6)',
+                    [uuidv4(), v.trabajador.id, v.trabajador.name, v.tipo, v.ts, JSON.stringify(data)]);
+      n++;
+    }
+  });
+  res.json({ ok: true, importados: n, omitidos: vista.length - n,
+             sin_trabajador: vista.filter(v => !v.trabajador).length, duplicados: vista.filter(v => v.duplicado).length });
+}));
+
 // Completar un registro (horas por Job al salir) o edición del administrador
 app.patch('/api/records/:id', aw(async (req, res) => {
   const b = { ...req.body };

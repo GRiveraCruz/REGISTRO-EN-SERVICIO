@@ -351,3 +351,54 @@ respaldo) y en el servidor solo como huella cifrada.
   - con "solo celular" activo, su computadora sigue aceptada.
 - **Trabajador sin Home office** con "solo celular" activo → computadora rechazada, como
   antes.
+
+---
+
+# v2.12 — Importar registros del kiosco de contingencia
+
+- **Pestaña nueva "📥 Contingencia"** (admin y RRHH): importa el CSV descargado del **kiosco
+  de contingencia**, la aplicación aparte para registrar desde casa cuando este kiosco no
+  está disponible.
+- **Vista previa antes de importar:**
+  - cada nombre del archivo se relaciona **automáticamente** con un trabajador de Control
+    de Personal, sin importar acentos ni el orden de los nombres;
+  - si no se encuentra, se elige de una lista. Los que se dejan sin relacionar no se
+    importan;
+  - el estado de cada renglón: se importará, ya importado, sin trabajador o inválido.
+- **Al importar:**
+  - las salidas calculan **horas de jornada, base y extra** contra la entrada anterior,
+    con la misma regla del kiosco;
+  - los registros quedan con ubicación **"Contingencia (desde casa)"**, marcados como Home
+    office y con `origen: contingencia`;
+  - **sin duplicados**: cada renglón guarda su id de contingencia, así que importar el mismo
+    archivo otra vez no repite nada.
+- `POST /api/contingencia/importar` (`csv`, `mapeo`, `aplicar`).
+
+## Probado
+- **Kiosco de contingencia:**
+  - con código incorrecto se rechaza; una salida sin entrada también; una doble entrada,
+    también;
+  - el CSV salió con 4 renglones.
+- **Importación:**
+  - "MUÑOZ RODRIGUEZ LUZ AILED" y "HERNANDEZ DELFINO" se relacionaron solos con su
+    trabajador; "JUAN INEXISTENTE" quedó sin relacionar;
+  - se importaron 3 y se omitió 1;
+  - al reimportar: 0 nuevos y 3 duplicados detectados.
+
+---
+
+# v2.13 — Corrección: el modo Home office no se aplicaba al iniciar sesión
+
+- **Qué pasaba:** al entrar como trabajador, por nombre o con PIN, la sesión se armaba sin
+  el dato `homeOffice`. Por eso el kiosco seguía validando la ubicación ("Fuera de la región
+  autorizada…") aunque el trabajador tuviera activado Home office. En las pruebas de la
+  v2.10 la sesión se había armado directo con la ficha completa del trabajador, y por eso
+  no se detectó.
+- **Corrección:**
+  - los dos accesos (por nombre y con PIN) incluyen ahora `homeOffice` en la sesión;
+  - como respaldo, si la sesión no lo trae, el kiosco lo toma de la ficha del trabajador.
+- **El servidor ya marcaba los registros** como Home office según la ficha del trabajador;
+  ese comportamiento no cambia.
+- **Probado** con el flujo real, con el GPS lejos de cualquier geocerca:
+  - entrada por nombre → "🏠 Modo Home office: tu ubicación no se valida…";
+  - entrada con PIN → igual.
