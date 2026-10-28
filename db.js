@@ -80,6 +80,18 @@ CREATE TABLE IF NOT EXISTS kiosco_pausas (
   created_at  TIMESTAMP DEFAULT now()
 );
 CREATE INDEX IF NOT EXISTS ix_kiosco_pausas_worker_ts ON kiosco_pausas (worker_tid, ts);
+-- v2.17: eventos de validación de ubicación (rechazos y alertas) para revisión de RRHH
+CREATE TABLE IF NOT EXISTS kiosco_geo_eventos (
+  id          VARCHAR PRIMARY KEY,
+  worker_tid  VARCHAR,
+  worker_name VARCHAR,
+  ts          VARCHAR NOT NULL,
+  accion      VARCHAR NOT NULL,          -- 'rechazado' | 'alerta'
+  motivo      VARCHAR NOT NULL,
+  registro_id VARCHAR,
+  data        JSONB NOT NULL DEFAULT '{}'::jsonb
+);
+CREATE INDEX IF NOT EXISTS ix_kiosco_geo_eventos_ts ON kiosco_geo_eventos (ts);
 CREATE TABLE IF NOT EXISTS kiosco_dispositivos (
   id            VARCHAR PRIMARY KEY,
   worker_tid    VARCHAR NOT NULL,

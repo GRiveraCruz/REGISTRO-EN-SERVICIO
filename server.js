@@ -731,6 +731,97 @@ app.get('/api/records', aw(async (req, res) => res.json(await buscarRegistros(re
 const ESPERA_MIN = Math.max(0, parseFloat(process.env.KIOSCO_ESPERA_MIN || '5') || 0);
 app.get('/api/config/registro', (req, res) => res.json({ espera_minutos: ESPERA_MIN }));
 
+// ─── VALIDACIÓN DE UBICACIÓN EN EL SERVIDOR (v2.17) ─────────────────────────────
+// El servidor ya no confía en el "inGeofence" del navegador:
+//  · recalcula la distancia a las ubicaciones permitidas del trabajador;
+//  · rechaza ubicaciones con precisión mala o sospechosamente perfecta (0 m) y ubicaciones
+//    viejas (posición tomada hace más de N segundos);
+//  · marca (sin rechazar) "viajes imposibles" y coordenadas idénticas en días distintos.
+// Rechazos y alertas quedan en kiosco_geo_eventos para revisión (pestaña 🛡 Ubicación).
+const GEO_DEFAULT = { precision_max_m: 100, antiguedad_max_s: 30, rechazar_precision_cero: true,
+                      precision_en_computadora: false, velocidad_max_kmh: 120, distancia_min_viaje_km: 5 };
+async function geoCfg() { return { ...GEO_DEFAULT, ...((await db.getConfig('geo_validacion', {})) || {}) }; }
+function distanciaM(lat1, lng1, lat2, lng2) {
+  const R = 6371000, rad = (x) => x * Math.PI / 180;
+  const dLat = rad(lat2 - lat1), dLng = rad(lng2 - lng1);
+  const a = Math.sin(dLat / 2) ** 2 + Math.cos(rad(lat1)) * Math.cos(rad(lat2)) * Math.sin(dLng / 2) ** 2;
+  return 2 * R * Math.asin(Math.sqrt(a));
+}
+async function geoEvento(w, accion, motivo, data, registroId) {
+  try {
+    await db.q('INSERT INTO kiosco_geo_eventos (id, worker_tid, worker_name, ts, accion, motivo, registro_id, data) VALUES ($1,$2,$3,$4,$5,$6,$7,$8)',
+               [uuidv4(), w.id, w.name, new Date().toISOString(), accion, motivo, registroId || null, JSON.stringify(data || {})]);
+  } catch (e) { console.warn('[GEO] evento:', e.message); }
+}
+async function validarUbicacion(workerId, b, tipoDisp) {
+  const w = await trabajadorPorId(workerId);
+  if (!w) return { ok: false, error: 'Trabajador no encontrado' };
+  if (w.homeOffice) return { ok: true, homeOffice: true, alertas: [] };          // Smart Work: la ubicación no se valida
+  const cfg = await geoCfg();
+  const lat = parseFloat(b.lat), lng = parseFloat(b.lng), acc = (b.accuracy == null || b.accuracy === '') ? null : parseFloat(b.accuracy);
+  const datos = { lat, lng, accuracy: acc, dispositivo: tipoDisp };
+  const rechazo = async (motivo) => { await geoEvento(w, 'rechazado', motivo, datos); return { ok: false, error: motivo, geo_rechazo: true }; };
+  if (isNaN(lat) || isNaN(lng)) return rechazo('No se recibió tu ubicación. Activa la ubicación del dispositivo e inténtalo de nuevo.');
+  const esCompu = tipoDisp === 'computadora';
+  if (!esCompu || cfg.precision_en_computadora) {
+    if (acc == null || isNaN(acc)) return rechazo('No se recibió la precisión de tu ubicación. Actualiza la página e inténtalo de nuevo.');
+    if (cfg.rechazar_precision_cero && acc <= 0) return rechazo('La ubicación recibida no es válida (precisión de 0 m). Desactiva cualquier aplicación de ubicación simulada.');
+    if (acc > cfg.precision_max_m) return rechazo(`Tu ubicación no es lo bastante precisa (±${Math.round(acc)} m; máximo ±${cfg.precision_max_m} m). Activa el GPS o la "ubicación precisa" y vuelve a intentar al aire libre o cerca de una ventana.`);
+  }
+  // antigüedad: se mide con el reloj del propio dispositivo (geoTs vs clientNow): no influye su desfase
+  const gts = parseFloat(b.geoTs), cnow = parseFloat(b.clientNow);
+  if (!isNaN(gts) && !isNaN(cnow)) {
+    const edad = (cnow - gts) / 1000;
+    if (edad > cfg.antiguedad_max_s) return rechazo(`La ubicación tiene ${Math.round(edad)} s de antigüedad (máximo ${cfg.antiguedad_max_s} s). Vuelve a intentar.`);
+  } else if (!esCompu) return rechazo('No se pudo verificar que tu ubicación sea actual. Actualiza la página e inténtalo de nuevo.');
+  const locs = (await db.q('SELECT id, data FROM kiosco_ubicaciones')).rows.map(r => ({ id: r.id, ...r.data }));
+  const permitidas = (w.locationIds && w.locationIds.length) ? locs.filter(l => w.locationIds.includes(l.id)) : locs;
+  if (!permitidas.length) return rechazo('No tienes un punto de registro asignado. Contacta a tu supervisor.');
+  let mejor = null;
+  for (const l of permitidas) {
+    const d = distanciaM(lat, lng, parseFloat(l.lat), parseFloat(l.lng));
+    if (!mejor || d < mejor.d) mejor = { l, d };
+  }
+  const radio = parseFloat(mejor.l.radius || 150);
+  const tolerancia = Math.min(acc == null || isNaN(acc) ? 0 : acc, 30);          // se toleran hasta 30 m de imprecisión
+  if (mejor.d > radio + tolerancia)
+    return rechazo(`Estás fuera del punto de registro "${mejor.l.name || ''}" (${Math.round(mejor.d)} m del centro; radio ${Math.round(radio)} m).`);
+  const alertas = [];
+  const ant = (await db.q(`SELECT ts, data FROM kiosco_registros WHERE worker_tid = $1 AND (data->>'lat') IS NOT NULL ORDER BY ts DESC LIMIT 1`, [workerId])).rows[0];
+  if (ant && ant.data && ant.data.lat != null) {
+    const dkm = distanciaM(lat, lng, parseFloat(ant.data.lat), parseFloat(ant.data.lng)) / 1000;
+    const horas = Math.max((Date.now() - Date.parse(ant.ts)) / 3600000, 1 / 60);
+    if (dkm >= cfg.distancia_min_viaje_km && dkm / horas > cfg.velocidad_max_kmh)
+      alertas.push(`Viaje imposible: ${dkm.toFixed(1)} km desde el registro anterior en ${Math.round(horas * 60)} min (${Math.round(dkm / horas)} km/h)`);
+  }
+  const lat6 = lat.toFixed(6), lng6 = lng.toFixed(6), hoy = new Date().toISOString().slice(0, 10);
+  // en computadoras (ubicación por Wi-Fi) es normal repetir el mismo punto: no se revisa
+  const igual = esCompu ? null : (await db.q(`SELECT ts FROM kiosco_registros WHERE worker_tid = $1 AND data->>'lat' IS NOT NULL AND data->>'lat' <> ''
+                              AND round((data->>'lat')::numeric, 6) = $2::numeric AND round((data->>'lng')::numeric, 6) = $3::numeric
+                              AND substr(ts, 1, 10) <> $4 LIMIT 1`, [workerId, lat6, lng6, hoy])).rows[0];
+  if (igual) alertas.push(`Coordenadas idénticas a un registro del ${igual.ts.slice(0, 10)} (${lat6}, ${lng6}): posible ubicación simulada`);
+  return { ok: true, inGeofence: true, location: mejor.l, distancia_m: Math.round(mejor.d), alertas, w, datos };
+}
+
+// eventos de ubicación (rechazos y alertas) y configuración
+app.get('/api/geo/eventos', aw(async (req, res) => {
+  const params = [], cond = [];
+  if (req.query.from) { params.push(new Date(req.query.from + 'T00:00:00-06:00').toISOString()); cond.push(`ts >= $${params.length}`); }
+  if (req.query.to) { params.push(new Date(req.query.to + 'T23:59:59.999-06:00').toISOString()); cond.push(`ts <= $${params.length}`); }
+  if (req.query.accion) { params.push(req.query.accion); cond.push(`accion = $${params.length}`); }
+  const r = await db.q(`SELECT * FROM kiosco_geo_eventos ${cond.length ? 'WHERE ' + cond.join(' AND ') : ''} ORDER BY ts DESC LIMIT 1000`, params);
+  res.json(r.rows);
+}));
+app.get('/api/geo/config', aw(async (req, res) => res.json(await geoCfg())));
+app.put('/api/geo/config', aw(async (req, res) => {
+  const b = req.body || {}, cfg = await geoCfg();
+  for (const k of ['precision_max_m', 'antiguedad_max_s', 'velocidad_max_kmh', 'distancia_min_viaje_km'])
+    if (k in b) { const v = parseFloat(b[k]); if (isNaN(v) || v <= 0) return res.status(400).json({ error: `Valor inválido: ${k}` }); cfg[k] = v; }
+  for (const k of ['rechazar_precision_cero', 'precision_en_computadora']) if (k in b) cfg[k] = !!b[k];
+  await db.setConfig('geo_validacion', cfg);
+  res.json({ success: true, config: cfg });
+}));
+
 // ─── JOBS EN WIP DEL ERP (v2.15) ──────────────────────────────────────────────
 // El kiosco lee la tabla `jobs` de la Suite (misma base de datos) y solo ofrece los Jobs
 // con estatus WIP. "ADMIN" siempre está disponible para horas administrativas.
@@ -783,8 +874,17 @@ app.post('/api/records', aw(async (req, res) => {
   if (ver.estado === 'pendiente' || ver.estado === 'rechazado')
     return res.status(403).json({ error: ver.mensaje || 'Dispositivo no autorizado', dispositivo_estado: ver.estado });
   b.dispositivo = { tipo: ver.dispositivo.tipo, os: ver.dispositivo.os, navegador: ver.dispositivo.navegador, autorizado: ver.estado === 'autorizado' };
+  // v2.17: la ubicación la valida el servidor (no se confía en el navegador)
+  const geo = await validarUbicacion(workerId, b, ver.dispositivo.tipo);
+  if (!geo.ok) return res.status(403).json({ error: geo.error, geo_rechazo: !!geo.geo_rechazo });
+  if (!geo.homeOffice) {
+    b.inGeofence = true; b.locationId = geo.location.id; b.locationName = geo.location.name || b.locationName;
+    b.geo = { distancia_m: geo.distancia_m, accuracy: geo.datos.accuracy, validado_servidor: true, alertas: geo.alertas };
+  }
+  delete b.geoTs; delete b.clientNow;
   // v2.10: trabajador en Smart Work → el registro se marca así (la ubicación no se valida)
   { const wHO = await trabajadorPorId(workerId); b.homeOffice = !!(wHO && wHO.homeOffice); if (b.homeOffice) { b.inGeofence = false; b.locationName = 'Smart Work'; b.locationId = null; } }
+  if (geo.alertas && geo.alertas.length) for (const a of geo.alertas) await geoEvento(geo.w, 'alerta', a, { ...geo.datos, tipo }, id);
   const resultado = await db.tx(async (c) => {
     await c.query('SELECT pg_advisory_xact_lock(hashtext($1))', ['kiosco-registro:' + workerId]);
     const ult = (await c.query('SELECT tipo, ts FROM kiosco_registros WHERE worker_tid = $1 ORDER BY ts DESC LIMIT 1', [workerId])).rows[0];
@@ -841,7 +941,11 @@ app.post('/api/pausas', aw(async (req, res) => {
   const ver = await verificarDispositivo(req, workerId, b.deviceId, b.deviceInfo);
   if (ver.estado === 'pendiente' || ver.estado === 'rechazado')
     return res.status(403).json({ error: ver.mensaje || 'Dispositivo no autorizado', dispositivo_estado: ver.estado });
+  const geo = await validarUbicacion(workerId, b, ver.dispositivo.tipo);                 // v2.17
+  if (!geo.ok) return res.status(403).json({ error: geo.error, geo_rechazo: !!geo.geo_rechazo });
+  if (!geo.homeOffice) { b.inGeofence = true; b.locationId = geo.location.id; b.locationName = geo.location.name || b.locationName; }
   const id = uuidv4(), ts = new Date().toISOString();
+  if (geo.alertas && geo.alertas.length) for (const a of geo.alertas) await geoEvento(geo.w, 'alerta', a, { ...geo.datos, tipo: 'pausa ' + tipo }, id);
   const resultado = await db.tx(async (c) => {
     await c.query('SELECT pg_advisory_xact_lock(hashtext($1))', ['kiosco-registro:' + workerId]);   // mismo candado que entrada/salida
     const ep = await estadoPausa(c, workerId);

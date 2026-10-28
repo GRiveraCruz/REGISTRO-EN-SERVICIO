@@ -1030,6 +1030,32 @@
     </div>
 
     <!-- PANEL: Reportes -->
+    <div class="panel" id="panel-geo">
+      <div class="page-header"><h2>🛡 Validación de ubicación</h2><p>El servidor revisa cada registro: distancia real al punto de registro, precisión y antigüedad de la ubicación. Aquí se ven los registros <b>rechazados</b> y las <b>alertas</b> (viaje imposible, coordenadas idénticas) para revisión.</p></div>
+      <div class="card">
+        <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:flex-end;margin-bottom:12px">
+          <div class="form-group" style="margin:0"><label>Desde</label><input type="date" id="geoDesde"></div>
+          <div class="form-group" style="margin:0"><label>Hasta</label><input type="date" id="geoHasta"></div>
+          <div class="form-group" style="margin:0"><label>Tipo</label><select id="geoAccion"><option value="">Todos</option><option value="rechazado">Rechazados</option><option value="alerta">Alertas</option></select></div>
+          <button class="btn btn-primary btn-sm" onclick="cargarGeo()">Consultar</button>
+        </div>
+        <div id="geoResumen" style="font-size:12px;color:var(--ink-soft);margin-bottom:8px"></div>
+        <div class="table-wrap"><table><thead><tr><th>Fecha</th><th>Trabajador</th><th>Tipo</th><th>Motivo</th><th>Precisión</th><th>Dispositivo</th><th>Mapa</th></tr></thead><tbody id="geoBody"></tbody></table></div>
+      </div>
+      <div class="card" id="geoCfgCard">
+        <div style="font-weight:700;margin-bottom:8px">Parámetros</div>
+        <div style="display:flex;gap:10px;flex-wrap:wrap;align-items:flex-end">
+          <div class="form-group" style="margin:0"><label>Precisión máxima (m)</label><input type="number" id="gcPrec" min="10" step="5" style="width:110px"></div>
+          <div class="form-group" style="margin:0"><label>Antigüedad máxima (s)</label><input type="number" id="gcEdad" min="5" step="5" style="width:110px"></div>
+          <div class="form-group" style="margin:0"><label>Velocidad máx. (km/h)</label><input type="number" id="gcVel" min="10" step="10" style="width:110px"></div>
+          <label style="display:flex;gap:6px;align-items:center;font-size:13px"><input type="checkbox" id="gcCero"> Rechazar precisión de 0 m</label>
+          <label style="display:flex;gap:6px;align-items:center;font-size:13px"><input type="checkbox" id="gcCompu"> Exigir precisión también en computadoras</label>
+          <button class="btn btn-secondary btn-sm" id="gcGuardar" onclick="guardarGeoCfg()">Guardar</button>
+        </div>
+        <div style="font-size:11.5px;color:var(--ink-soft);margin-top:8px">Las computadoras ubican por Wi-Fi/red y su precisión suele ser baja: por eso, de forma predeterminada, a ellas solo se les valida la distancia. Smart Work no valida ubicación.</div>
+      </div>
+    </div>
+
     <div class="panel" id="panel-contingencia">
       <div class="page-header"><h2>📥 Importar registros de contingencia</h2><p>Registros capturados en el kiosco de contingencia (desde casa) mientras este kiosco no estuvo disponible.</p></div>
       <div class="card">
@@ -2382,7 +2408,9 @@ async function registrarPausa(tipo){
   if (_pausaSesion) return toast('Ya registraste un movimiento de pausa en esta sesión.', 'error');
   disableActionBtns();
   const loc = getActiveLocation();
-  const body = { workerId: currentUser.id, workerName: currentUser.name, type: tipo, lat: currentLat, lng: currentLng,
+  const pf = esHomeOffice() ? null : await posicionFresca();                                   // v2.17
+  if (!esHomeOffice() && !pf) { toast('No se pudo obtener tu ubicación actual. Inténtalo de nuevo.', 'error'); enableActionBtns(); return; }
+  const body = { workerId: currentUser.id, workerName: currentUser.name, type: tipo, lat: currentLat, lng: currentLng, ...(pf || {}),
                  locationId: loc ? loc.id : null, locationName: loc ? loc.name : 'N/A', inGeofence: true,
                  deviceId: obtenerDeviceId(), deviceInfo: infoDispositivo() };
   try {
@@ -2523,6 +2551,54 @@ async function manGuardar() {
   try { if (typeof loadReports === 'function') loadReports(); } catch (e) {}
 }
 
+// ═══ v2.17 — Ubicación fresca para cada registro (el servidor valida precisión y antigüedad) ═══
+function posicionFresca() {
+  return new Promise(resolve => {
+    if (!navigator.geolocation) return resolve(null);
+    navigator.geolocation.getCurrentPosition(pos => {
+      currentLat = pos.coords.latitude; currentLng = pos.coords.longitude;
+      resolve({ lat: pos.coords.latitude, lng: pos.coords.longitude, accuracy: pos.coords.accuracy, geoTs: pos.timestamp, clientNow: Date.now() });
+    }, () => resolve(null), { enableHighAccuracy: true, timeout: 15000, maximumAge: 0 });
+  });
+}
+
+// ═══ v2.17 — Panel de validación de ubicación ═══
+async function cargarGeo() {
+  const de = document.getElementById('geoDesde'), ha = document.getElementById('geoHasta');
+  const iso = d => d.toISOString().slice(0, 10), hoy = new Date();
+  if (!de.value) { const x = new Date(hoy); x.setDate(x.getDate() - 7); de.value = iso(x); }
+  if (!ha.value) ha.value = iso(hoy);
+  const q = new URLSearchParams({ from: de.value, to: ha.value }); const ac = document.getElementById('geoAccion').value; if (ac) q.set('accion', ac);
+  let L = [];
+  try { L = await (await fetch('/api/geo/eventos?' + q)).json(); } catch (e) { return toast('No se pudieron cargar los eventos', 'error'); }
+  document.getElementById('geoBody').innerHTML = L.map(e => { const d = e.data || {};
+    return `<tr><td style="white-space:nowrap">${new Date(e.ts).toLocaleString('es-MX')}</td><td><strong>${e.worker_name || e.worker_tid}</strong></td>
+      <td>${e.accion === 'rechazado' ? '<span class="badge badge-red">Rechazado</span>' : '<span class="badge badge-amber">Alerta</span>'}</td>
+      <td style="font-size:12.5px">${e.motivo}</td><td style="font-size:12px">${d.accuracy != null && !isNaN(d.accuracy) ? '±' + Math.round(d.accuracy) + ' m' : '—'}</td>
+      <td style="font-size:12px">${d.dispositivo || ''}</td>
+      <td>${d.lat != null && !isNaN(d.lat) ? `<a target="_blank" href="https://maps.google.com/?q=${d.lat},${d.lng}">ver</a>` : '—'}</td></tr>`; }).join('')
+    || '<tr><td colspan="7" style="text-align:center;color:var(--ink-soft);padding:22px">Sin eventos en el periodo</td></tr>';
+  const r = L.filter(e => e.accion === 'rechazado').length;
+  document.getElementById('geoResumen').textContent = `${L.length} evento(s) · ${r} rechazado(s) · ${L.length - r} alerta(s)`;
+  try {
+    const c = await (await fetch('/api/geo/config')).json();
+    document.getElementById('gcPrec').value = c.precision_max_m; document.getElementById('gcEdad').value = c.antiguedad_max_s;
+    document.getElementById('gcVel').value = c.velocidad_max_kmh; document.getElementById('gcCero').checked = !!c.rechazar_precision_cero;
+    document.getElementById('gcCompu').checked = !!c.precision_en_computadora;
+    const admin = currentUser && currentUser.role === 'admin';
+    document.querySelectorAll('#geoCfgCard input').forEach(i => i.disabled = !admin);
+    document.getElementById('gcGuardar').style.display = admin ? '' : 'none';
+  } catch (e) {}
+}
+async function guardarGeoCfg() {
+  const body = { precision_max_m: document.getElementById('gcPrec').value, antiguedad_max_s: document.getElementById('gcEdad').value,
+                 velocidad_max_kmh: document.getElementById('gcVel').value, rechazar_precision_cero: document.getElementById('gcCero').checked,
+                 precision_en_computadora: document.getElementById('gcCompu').checked };
+  const r = await fetch('/api/geo/config', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+  const d = await r.json(); if (!r.ok) return toast(d.error || 'No se pudo guardar', 'error');
+  toast('Parámetros de ubicación guardados', 'success');
+}
+
 function mostrarLoginAdmin(si){
   document.getElementById('loginWorkerBox').style.display = si ? 'none' : '';
   document.getElementById('loginAdminBox').style.display = si ? '' : 'none';
@@ -2617,6 +2693,7 @@ function buildNav() {
     navItems.push({ id:'dispositivos', icon:'📱', label:'Dispositivos' });   // v2.6
     if (['admin','rrhh'].includes(currentUser.role)) navItems.push({ id:'pausas', icon:'☕', label:'Pausas' });   // v2.9: solo admin y RRHH
     if (['admin','rrhh'].includes(currentUser.role)) navItems.push({ id:'contingencia', icon:'📥', label:'Contingencia' });   // v2.12
+    if (['admin','rrhh'].includes(currentUser.role)) navItems.push({ id:'geo', icon:'🛡', label:'Ubicación' });               // v2.17
   }
 
   navItems.forEach(item => {
@@ -2653,6 +2730,7 @@ function showPanel(id) {
   if (id === 'notificaciones') loadNotifications();
   if (id === 'dispositivos') cargarDispositivos();
   if (id === 'pausas') cargarPausasAdmin();
+  if (id === 'geo') cargarGeo();
   if (id === 'reportes') { const bm = document.getElementById('btnRegistroManual'); if (bm) bm.style.display = currentUser && currentUser.role === 'admin' ? '' : 'none'; }
   if (id === 'contingencia') { document.getElementById('ctgVista').innerHTML = ''; document.getElementById('ctgBtn').style.display = 'none'; }
 }
@@ -2968,6 +3046,12 @@ async function registerRecord(type) {
 let _salidaPendiente = null;
 async function enviarRegistro(record) {
   const type = record.type;
+  // v2.17: ubicación tomada en el momento (con su precisión y hora) — el servidor la valida
+  if (!esHomeOffice()) {
+    const p = await posicionFresca();
+    if (!p) { toast('No se pudo obtener tu ubicación actual. Activa la ubicación del dispositivo e inténtalo de nuevo.', 'error'); checkGeofence(); return false; }
+    Object.assign(record, p);
+  }
   try {
     const r = await fetch('/api/records', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(record) });
     const data = await r.json();

@@ -527,3 +527,63 @@ respaldo) y en el servidor solo como huella cifrada.
   2 h → guardada, con su distribución y "por: admin".
 - **En pantalla:** el botón solo aparece al administrador, y la ventana avisa cuando falta
   la entrada.
+
+---
+
+# v2.17 — La ubicación la valida el servidor
+
+## Antes
+- El navegador calculaba si el trabajador estaba dentro de la geocerca y avisaba
+  `inGeofence: true`, y el servidor **le creía**. Un registro "dentro" se podía enviar sin
+  estar en la planta.
+
+## Ahora (cada entrada, salida y pausa)
+1. **Ubicación del momento:** al registrar, el kiosco pide una **ubicación nueva**, sin
+   reutilizar la de cuando se abrió la página. Envía coordenadas, **precisión** y la
+   **hora en que se tomó**.
+2. **El servidor recalcula la distancia** a los puntos de registro permitidos del trabajador.
+   Si está fuera del radio (con una tolerancia máxima de 30 m por imprecisión), **rechaza**
+   el registro e indica a cuántos metros está.
+3. **Precisión** (celulares y tablets):
+   - sin dato de precisión → rechazado;
+   - **0 m** (típico de las apps de ubicación falsa) → rechazado;
+   - **más de 100 m** → rechazado, con la indicación de activar el GPS o la "ubicación
+     precisa".
+4. **Antigüedad:** si la ubicación se tomó hace **más de 30 s** → rechazado. Se mide con el
+   reloj del propio dispositivo, así que su desfase de hora no influye.
+5. **Alertas (no rechazan; quedan para revisión):**
+   - **Viaje imposible:** más de 5 km desde el registro anterior a más de 120 km/h (por
+     ejemplo, 50 km en 1 minuto);
+   - **Coordenadas idénticas** al sexto decimal a un registro de **otro día**: un GPS real
+     no repite el punto exacto, una app falsa sí.
+- **El registro guarda:** el punto validado por el servidor, la distancia al centro, la
+  precisión y las alertas (`geo.validado_servidor: true`).
+- **Excepciones:**
+  - **Smart Work:** la ubicación no se valida (como antes);
+  - **computadoras:** se valida la **distancia**, pero no la precisión ni las coordenadas
+    repetidas, porque ubican por Wi-Fi o red y su precisión suele ser baja. Se puede
+    exigir también a ellas.
+
+## Pestaña nueva "🛡 Ubicación" (admin y RRHH)
+- **Lista de registros rechazados y alertas:** fecha, trabajador, motivo, precisión,
+  dispositivo y enlace al mapa. Filtros por fechas y tipo.
+- **Parámetros** (solo admin): precisión máxima, antigüedad máxima, velocidad máxima,
+  rechazar precisión 0 m y exigir precisión también en computadoras.
+
+## Al publicar
+- Pide al personal **recargar la página del kiosco**. La versión anterior en caché no envía la
+  precisión y el servidor la rechazará con el mensaje "Actualiza la página".
+- En celulares, la **"ubicación precisa"** del navegador debe estar activada (en Android:
+  Ajustes ▸ Ubicación ▸ Precisión de ubicación de Google).
+
+## Probado (PostgreSQL local)
+- **Celular, rechazados:** sin precisión, precisión 0 m, precisión ±500 m, ubicación de hace
+  60 s, a 2 km del punto y sin coordenadas.
+- **Celular, aceptado:** precisión ±15 m a 61 m del centro.
+- **Salida 1 minuto después a 50 km** (en otro punto permitido) → aceptada con alerta "Viaje
+  imposible (3001 km/h)".
+- **Entrada con las coordenadas exactas de un registro de hace 3 días** → alerta
+  "Coordenadas idénticas".
+- **Computadora sin precisión, dentro del radio** → aceptada.
+- **Desde la pantalla:** una entrada con ±12 m quedó en "Planta"; una pausa con precisión
+  0 m fue rechazada y apareció en la pestaña de Ubicación.
