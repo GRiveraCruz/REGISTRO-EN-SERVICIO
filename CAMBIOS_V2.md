@@ -423,3 +423,58 @@ respaldo) y en el servidor solo como huella cifrada.
   trabajador se conserva sin hacer nada.
 - **Probado:** un registro anterior con "Home office" quedó como "Smart Work". El mensaje
   desde celular, la ubicación de un registro nuevo y el cardex dicen "Smart Work".
+
+---
+
+# v2.15 — Horas por Job: lista de Jobs en WIP del ERP y horas antes de la salida
+
+## 1. ADMIN se mantiene
+- **"ADMIN"** sigue apareciendo siempre, para las horas administrativas.
+
+## 2. Jobs tomados del ERP (solo en WIP)
+- **El kiosco lee los Jobs de la Suite** (tabla `jobs` de la misma base de datos) y solo
+  ofrece los que tienen estatus **WIP**. Ya no hay que capturar los Jobs a mano por
+  trabajador.
+- **Endpoint nuevo:** `GET /api/jobs-wip` (número, cliente, descripción y PM).
+
+## 3. El trabajador agrega los Jobs de su día
+- **En la distribución de horas**, campo **"Agregar Job trabajado hoy"**:
+  - se escribe el número, el cliente o la descripción y se elige de la **lista de Jobs en
+    WIP**;
+  - "+ Agregar" añade el renglón para capturar sus horas;
+  - se pueden agregar **uno o varios** y quitar los que no apliquen (ADMIN no se quita).
+- **Validación:** si se escribe un Job que no está en WIP, se rechaza.
+- **"Tus Jobs":** los Jobs que el administrador ya tenía asignados al trabajador aparecen
+  como **botones de acceso rápido**, solo si siguen en WIP. El campo "Jobs permitidos" de
+  la ficha queda como lista de sugeridos.
+
+## 4. Las horas se capturan ANTES de que la salida quede registrada
+- **Al presionar "Registrar Salida"** ya no se envía la salida: se abre primero la
+  **distribución de horas**.
+- **La salida se registra solo al confirmar** ("🔴 Registrar salida con estas horas"),
+  **junto con** su distribución.
+- **"Cancelar" no registra la salida.** El trabajador puede volver a presionar "Registrar
+  Salida" cuando termine.
+- **El servidor también lo exige.** Una salida se rechaza si:
+  - no trae horas, o suman 0;
+  - algún Job no está en WIP en la Suite;
+  - la suma excede la jornada (cuando la jornada es mayor a 0 h).
+  - Los Jobs repetidos se suman y "admin" se normaliza a ADMIN.
+- **Así ya no quedan salidas sin horas** (registros vacíos o en falso).
+- **La edición de horas** de un día ya registrado (administrador, Reportes ▸ Jobs por día)
+  funciona igual que antes.
+
+## Probado (PostgreSQL local)
+- **Lista de Jobs:** con 2 Jobs WIP y 1 Done → la lista muestra solo los 2 WIP.
+- **Validaciones del servidor:**
+  - salida sin horas → rechazada;
+  - Job 559-99 (Done) → rechazado;
+  - 9 h en una jornada de 8 → rechazado;
+  - 652-50: 5 + 1 y admin: 2 → aceptada como 652-50: 6 h y ADMIN: 2 h.
+- **En pantalla:**
+  - "Registrar Salida" abre la distribución **sin** registrar nada (0 salidas en la base);
+  - agregar 559-99 → rechazado; agregar 652-50 → agregado;
+  - "Cancelar" → sigue sin salida;
+  - con 0 horas → no se registra;
+  - con ADMIN 2 h + 652-50 6 h → **salida registrada con sus horas** y la ventana se
+    cierra.

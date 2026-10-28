@@ -731,6 +731,39 @@ app.get('/api/records', aw(async (req, res) => res.json(await buscarRegistros(re
 const ESPERA_MIN = Math.max(0, parseFloat(process.env.KIOSCO_ESPERA_MIN || '5') || 0);
 app.get('/api/config/registro', (req, res) => res.json({ espera_minutos: ESPERA_MIN }));
 
+// ─── JOBS EN WIP DEL ERP (v2.15) ──────────────────────────────────────────────
+// El kiosco lee la tabla `jobs` de la Suite (misma base de datos) y solo ofrece los Jobs
+// con estatus WIP. "ADMIN" siempre está disponible para horas administrativas.
+async function jobsWip() {
+  const r = await db.q(`SELECT job_number, customer, data->>'description' AS descripcion, data->>'pm' AS pm
+                        FROM jobs WHERE upper(trim(COALESCE(status, data->>'status', ''))) = 'WIP' ORDER BY job_number`);
+  return r.rows.map(x => ({ job: String(x.job_number || '').trim().toUpperCase(), cliente: x.customer || '', descripcion: x.descripcion || '', pm: x.pm || '' }));
+}
+app.get('/api/jobs-wip', aw(async (req, res) => {
+  try { res.json(await jobsWip()); }
+  catch (e) { res.status(500).json({ error: 'No se pudo leer la lista de Jobs de la Suite: ' + e.message }); }
+}));
+async function validarJobHours(lista, total) {
+  if (!Array.isArray(lista) || !lista.length)
+    return { error: 'Antes de registrar tu salida debes repartir tus horas en ADMIN o en los Jobs que trabajaste.' };
+  let wip = null;
+  try { wip = new Set((await jobsWip()).map(j => j.job)); } catch (e) { wip = null; }   // si no se puede leer, no se bloquea
+  const out = {}; let suma = 0;
+  for (const it of lista) {
+    const job = String((it && it.job) || '').trim().toUpperCase();
+    const h = Math.round((parseFloat(it && it.hours) || 0) * 100) / 100;
+    if (!job || h <= 0) continue;
+    if (h > 24) return { error: `Horas inválidas en ${job}` };
+    if (job !== 'ADMIN' && wip && !wip.has(job)) return { error: `El Job ${job} no está en WIP en la Suite. Elige un Job de la lista o usa ADMIN.` };
+    out[job] = Math.round(((out[job] || 0) + h) * 100) / 100; suma += h;
+  }
+  suma = Math.round(suma * 100) / 100;
+  if (suma <= 0) return { error: 'Las horas no pueden quedar en cero: asígnalas a ADMIN o a algún Job.' };
+  const t = parseFloat(total);
+  if (!isNaN(t) && t > 0 && suma > t + 0.01) return { error: `Las horas asignadas (${suma} h) exceden la jornada (${t} h).` };
+  return { jobHours: Object.entries(out).map(([job, hours]) => ({ job, hours })) };
+}
+
 app.post('/api/records', aw(async (req, res) => {
   const b = { ...req.body };
   const id = uuidv4(), ts = new Date().toISOString();
@@ -738,6 +771,12 @@ app.post('/api/records', aw(async (req, res) => {
   delete b.id; delete b.workerId; delete b.workerName; delete b.type; delete b.timestamp;
   if (!workerId) return res.status(400).json({ error: 'Falta identificar al trabajador' });
   if (!['entrada', 'salida'].includes(tipo)) return res.status(400).json({ error: 'Tipo de registro inválido' });
+  // v2.15: la SALIDA solo se asienta junto con la distribución de horas por Job (ADMIN o Jobs en WIP del ERP)
+  if (tipo === 'salida') {
+    const v = await validarJobHours(b.jobHours, b.totalHours);
+    if (v.error) return res.status(400).json({ error: v.error, requiere_horas: true });
+    b.jobHours = v.jobHours;
+  } else delete b.jobHours;
   // v2.6: dispositivo autorizado (y celular, si así se configuró) + tipo de dispositivo en el registro
   const ver = await verificarDispositivo(req, workerId, b.deviceId, b.deviceInfo);
   delete b.deviceId; delete b.deviceInfo;

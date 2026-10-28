@@ -544,6 +544,7 @@
   <div class="modal" style="max-width:520px;">
     <div class="modal-drag"></div>
     <div class="modal-title">🗂 Distribución de Horas por Job</div>
+    <div style="font-size:12.5px;color:var(--ink-soft);margin:-6px 0 12px">Reparte tus horas del día <b>antes</b> de registrar tu salida. La salida se registra al confirmar.</div>
     <div id="jobHoursSummary" style="background:var(--surface);border:1.5px solid var(--border);border-radius:var(--r);padding:12px 16px;margin-bottom:18px;display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px;">
       <div>
         <div style="font-size:11px;color:var(--ink-soft);font-weight:700;text-transform:uppercase;letter-spacing:.5px;">Total de horas del día</div>
@@ -561,12 +562,24 @@
         <span>Job / Proyecto</span><span>Horas</span>
       </div>
       <div id="jobHoursBody"></div>
+      <!-- v2.15: agregar Jobs en WIP del ERP -->
+      <div style="margin-top:10px">
+        <div style="font-size:11px;font-weight:700;color:var(--ink-soft);text-transform:uppercase;letter-spacing:.5px;margin-bottom:6px">Agregar Job trabajado hoy (Jobs en WIP)</div>
+        <div style="display:flex;gap:6px">
+          <input type="text" id="jhJobBuscar" list="jhJobsWip" placeholder="Escribe el número, cliente o descripción…" autocomplete="off" onkeydown="if(event.key==='Enter'){event.preventDefault();jhAgregarJob();}" style="flex:1;padding:10px;border:1.5px solid var(--border);border-radius:var(--r);font-size:14px">
+          <datalist id="jhJobsWip"></datalist>
+          <button type="button" class="btn btn-secondary" onclick="jhAgregarJob()">+ Agregar</button>
+        </div>
+        <div id="jhSugeridos" style="display:flex;gap:6px;flex-wrap:wrap;margin-top:8px"></div>
+        <div id="jhJobsMsg" style="font-size:11.5px;color:var(--ink-soft);margin-top:6px"></div>
+      </div>
     </div>
     <div style="font-size:12px;color:var(--ink-soft);margin-bottom:16px;">
-      💡 La suma no puede exceder el total de la jornada. Deja en 0 los jobs no trabajados — pero <b>la suma total no puede quedar en 0</b>, es obligatorio asignar tus horas a algún Job o a ADMIN para poder guardar.
+      💡 La suma no puede exceder el total de la jornada y <b>no puede quedar en 0</b>: asigna tus horas a ADMIN o a los Jobs que trabajaste.
     </div>
-    <div class="modal-actions">
-      <button class="btn btn-primary btn-full" onclick="saveJobHours()">✅ Guardar distribución</button>
+    <div class="modal-actions" style="display:flex;gap:8px">
+      <button class="btn btn-secondary" onclick="jhCancelarSalida()">Cancelar</button>
+      <button class="btn btn-primary btn-full" id="jhBtnGuardar" onclick="saveJobHours()">🔴 Registrar salida con estas horas</button>
     </div>
   </div>
 </div>
@@ -2853,6 +2866,20 @@ async function registerRecord(type) {
     deviceId: obtenerDeviceId(), deviceInfo: infoDispositivo()      // v2.6
   };
 
+  // v2.15: la salida NO se envía todavía: primero se reparten las horas por Job
+  if (type === 'salida') {
+    _salidaPendiente = record;
+    openJobHoursModal(null, totalHours ?? 0);
+    enableActionBtns();
+    return;
+  }
+  return enviarRegistro(record);
+}
+
+// v2.15: envía el registro (entrada, o salida ya con su distribución de horas)
+let _salidaPendiente = null;
+async function enviarRegistro(record) {
+  const type = record.type;
   try {
     const r = await fetch('/api/records', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(record) });
     const data = await r.json();
@@ -2863,10 +2890,7 @@ async function registerRecord(type) {
       loadMyRecords();
       setTimeout(cargarCardex, 600);                    // v2.4: horas de la semana
       enableActionBtns();
-      // Always show job hours modal on salida (even 0h — let user assign ADMIN)
-      if (type === 'salida') {
-        openJobHoursModal(data.record.id, totalHours ?? 0);
-      }
+      return true;
     } else {
       toast(data.error, 'error');
       if (data.dispositivo_estado) { _disp = { estado: data.dispositivo_estado, mensaje: data.error }; mostrarAvisoDispositivo(); }
@@ -2874,8 +2898,9 @@ async function registerRecord(type) {
       if (data.ultimo && !records.some(x => x.workerId === currentUser.id && x.timestamp === data.ultimo.timestamp))
         records.push({ workerId: currentUser.id, type: data.ultimo.type, timestamp: data.ultimo.timestamp });
       checkGeofence();
+      return false;
     }
-  } catch(e) { toast('Error al registrar', 'error'); checkGeofence(); }
+  } catch(e) { toast('Error al registrar', 'error'); checkGeofence(); return false; }
 }
 
 async function loadMyRecords() {
@@ -2948,23 +2973,62 @@ function openJobHoursModal(recordId, totalHours) {
   pendingJobHoursRecordId = recordId;
   pendingJobHoursTotal    = totalHours;
 
-  // Jobs: always start with ADMIN, then the worker's allowedJobs
-  const jobs = ['ADMIN', ...(currentUser.allowedJobs || [])];
+  // v2.15: ADMIN siempre; los Jobs se agregan desde la lista de Jobs en WIP del ERP
+  const jobs = ['ADMIN'];
+  jhCargarWip();
 
   document.getElementById('jobHoursTotalDisplay').textContent    = `${totalHours} h`;
   document.getElementById('jobHoursAssignedDisplay').textContent = '0 h';
   document.getElementById('jobHoursAssignedDisplay').style.color = 'var(--ink)';
   document.getElementById('jobHoursError').style.display         = 'none';
 
-  document.getElementById('jobHoursBody').innerHTML = jobs.map(job => `
-    <div style="display:flex;align-items:center;justify-content:space-between;padding:10px 4px;border-bottom:1px solid var(--border);">
-      <span class="job-tag" style="font-size:14px;padding:5px 12px;">${job}</span>
-      <input type="number" class="job-hours-input" data-job="${job}"
-        min="0" max="${totalHours}" step="0.5" value="0"
-        inputmode="decimal" oninput="updateJobHoursTotals()" />
-    </div>`).join('');
+  document.getElementById('jobHoursBody').innerHTML = jobs.map(job => jhFilaHTML(job, totalHours)).join('');
+  document.getElementById('jhJobBuscar').value = '';
 
   document.getElementById('jobHoursModal').classList.add('open');
+}
+
+// ═══ v2.15 — Jobs en WIP del ERP para repartir las horas ═══
+let _jobsWip = null;
+function jhFilaHTML(job, totalHours, info) {
+  const quitar = job === 'ADMIN' ? '' : `<button type="button" onclick="this.closest('.jh-fila').remove();updateJobHoursTotals()" style="border:none;background:none;color:var(--red);font-size:18px;cursor:pointer;padding:0 6px" title="Quitar">✕</button>`;
+  return `<div class="jh-fila" style="display:flex;align-items:center;justify-content:space-between;gap:8px;padding:10px 4px;border-bottom:1px solid var(--border);">
+      <div style="min-width:0"><span class="job-tag" style="font-size:14px;padding:5px 12px;">${job}</span>
+        ${info ? `<div style="font-size:11px;color:var(--ink-soft);margin-top:3px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:280px">${info}</div>` : (job==='ADMIN' ? '<div style="font-size:11px;color:var(--ink-soft);margin-top:3px">Horas administrativas</div>' : '')}</div>
+      <div style="display:flex;align-items:center"><input type="number" class="job-hours-input" data-job="${job}" min="0" max="${totalHours}" step="0.5" value="0" inputmode="decimal" oninput="updateJobHoursTotals()" />${quitar}</div>
+    </div>`;
+}
+async function jhCargarWip() {
+  const msg = document.getElementById('jhJobsMsg');
+  if (!_jobsWip) {
+    msg.textContent = 'Cargando Jobs en WIP…';
+    try { const r = await fetch('/api/jobs-wip'); const d = await r.json(); if (!r.ok) throw new Error(d.error); _jobsWip = d; }
+    catch (e) { msg.textContent = '⚠ No se pudo cargar la lista de Jobs: ' + e.message + ' (puedes usar ADMIN).'; return; }
+  }
+  document.getElementById('jhJobsWip').innerHTML = _jobsWip.map(j => `<option value="${j.job}">${j.job} · ${j.cliente}${j.descripcion ? ' · ' + j.descripcion.slice(0, 50) : ''}</option>`).join('');
+  msg.textContent = `${_jobsWip.length} Job(s) en WIP disponibles.`;
+  // sugeridos: los Jobs que el administrador le asignó al trabajador y que siguen en WIP
+  const wip = new Set(_jobsWip.map(j => j.job));
+  const sug = (currentUser.allowedJobs || []).map(x => String(x).trim().toUpperCase()).filter(x => wip.has(x));
+  document.getElementById('jhSugeridos').innerHTML = sug.length ? '<span style="font-size:11px;color:var(--ink-soft);align-self:center">Tus Jobs:</span>' + sug.map(x => `<button type="button" class="btn btn-secondary btn-sm" onclick="jhAgregarJob('${x}')" style="padding:4px 10px">+ ${x}</button>`).join('') : '';
+}
+function jhAgregarJob(valor) {
+  const inp = document.getElementById('jhJobBuscar');
+  let txt = String(valor || inp.value || '').trim().toUpperCase();
+  if (!txt) return;
+  txt = txt.split('·')[0].trim();
+  const j = (_jobsWip || []).find(x => x.job === txt) || (_jobsWip || []).find(x => (x.job + ' ' + x.cliente + ' ' + x.descripcion).toUpperCase().includes(txt));
+  if (!j) return toast(`"${txt}" no es un Job en WIP. Elige uno de la lista.`, 'error');
+  if (document.querySelector(`.job-hours-input[data-job="${j.job}"]`)) { inp.value = ''; return toast(`${j.job} ya está en la lista`, 'error'); }
+  document.getElementById('jobHoursBody').insertAdjacentHTML('beforeend', jhFilaHTML(j.job, pendingJobHoursTotal, `${j.cliente}${j.descripcion ? ' · ' + j.descripcion : ''}`));
+  inp.value = '';
+  const nuevo = document.querySelector(`.job-hours-input[data-job="${j.job}"]`); if (nuevo) { nuevo.focus(); nuevo.select(); }
+}
+function jhCancelarSalida() {
+  if (_salidaPendiente) toast('No se registró la salida. Cuando termines tu jornada, vuelve a presionar "Registrar Salida".', 'info');
+  _salidaPendiente = null;
+  closeModal('jobHoursModal');
+  enableActionBtns();
 }
 
 function updateJobHoursTotals() {
@@ -2973,7 +3037,7 @@ function updateJobHoursTotals() {
   inputs.forEach(inp => { assigned += parseFloat(inp.value) || 0; });
   assigned = Math.round(assigned * 100) / 100;
 
-  const over = assigned > pendingJobHoursTotal;
+  const over = pendingJobHoursTotal > 0 && assigned > pendingJobHoursTotal;   // v2.15: con jornada 0 h no se limita
   document.getElementById('jobHoursAssignedDisplay').textContent = `${assigned} h`;
   document.getElementById('jobHoursAssignedDisplay').style.color = over ? '#DC2626' : (assigned === pendingJobHoursTotal ? 'var(--green)' : 'var(--ink)');
   inputs.forEach(inp => inp.classList.toggle('over', over));
@@ -3002,10 +3066,18 @@ async function saveJobHours() {
   if (assigned <= 0) {
     return toast('Debes repartir tus horas en al menos un Job o en ADMIN antes de poder registrar tu salida — no pueden quedar en cero.', 'error');
   }
-  if (assigned > pendingJobHoursTotal) {
+  if (pendingJobHoursTotal > 0 && assigned > pendingJobHoursTotal) {
     return toast(`Las horas asignadas (${assigned} h) exceden el total de la jornada (${pendingJobHoursTotal} h)`, 'error');
   }
 
+  // v2.15: salida pendiente → se registra AHORA, junto con su distribución de horas
+  if (_salidaPendiente) {
+    const btn = document.getElementById('jhBtnGuardar'); btn.disabled = true;
+    const ok = await enviarRegistro({ ..._salidaPendiente, jobHours });
+    btn.disabled = false;
+    if (ok) { _salidaPendiente = null; closeModal('jobHoursModal'); }
+    return;
+  }
   // PATCH the salida record to add jobHours
   try {
     const r = await fetch(`/api/records/${pendingJobHoursRecordId}`, {
