@@ -979,6 +979,69 @@ app.post('/api/contingencia/importar', aw(async (req, res) => {
              sin_trabajador: vista.filter(v => !v.trabajador).length, duplicados: vista.filter(v => v.duplicado).length });
 }));
 
+// ─── REGISTRO MANUAL (v2.16) — solo el administrador, con su contraseña ─────────
+// Para entradas/salidas que no se registraron (olvido, falla de red o dispositivo). Se
+// valida que la secuencia quede Entrada → Salida alrededor de la fecha elegida; la salida
+// calcula sus horas contra la entrada anterior y exige la distribución por Job.
+app.post('/api/records/manual', aw(async (req, res) => {
+  const b = req.body || {};
+  const r = await db.q('SELECT * FROM kiosco_usuarios WHERE username = $1', [String(b.adminUser || '')]);
+  const u = r.rows[0];
+  if (!u || u.role !== 'admin') return res.status(403).json({ error: 'Solo el administrador del sistema puede agregar registros manuales.' });
+  if (!(await bcrypt.compare(String(b.password || ''), u.password_hash))) {
+    console.warn(`[MANUAL] contraseña incorrecta de ${u.username}`);
+    return res.status(401).json({ error: 'Contraseña incorrecta' });
+  }
+  const workerId = String(b.workerId || ''), tipo = b.type;
+  if (!workerId) return res.status(400).json({ error: 'Elige el trabajador' });
+  if (!['entrada', 'salida'].includes(tipo)) return res.status(400).json({ error: 'Tipo inválido' });
+  const motivo = String(b.motivo || '').trim();
+  if (motivo.length < 5) return res.status(400).json({ error: 'Escribe el motivo del registro manual' });
+  const f = new Date(b.timestamp || '');
+  if (isNaN(f)) return res.status(400).json({ error: 'Fecha y hora inválidas' });
+  if (f.getTime() > Date.now() + 60000) return res.status(400).json({ error: 'No se pueden registrar fechas futuras' });
+  const ts = f.toISOString();
+  const w = await trabajadorPorId(workerId);
+  if (!w) return res.status(404).json({ error: 'Trabajador no encontrado' });
+  const resultado = await db.tx(async (c) => {
+    await c.query('SELECT pg_advisory_xact_lock(hashtext($1))', ['kiosco-registro:' + workerId]);
+    const ant = (await c.query('SELECT id, tipo, ts FROM kiosco_registros WHERE worker_tid = $1 AND ts < $2 ORDER BY ts DESC LIMIT 1', [workerId, ts])).rows[0];
+    const sig = (await c.query('SELECT id, tipo, ts FROM kiosco_registros WHERE worker_tid = $1 AND ts > $2 ORDER BY ts ASC LIMIT 1', [workerId, ts])).rows[0];
+    const fmt = (x) => new Date(x.ts).toLocaleString('es-MX', { timeZone: TZ_LOCAL });
+    if (tipo === 'entrada' && ant && ant.tipo === 'entrada')
+      return { status: 409, body: { error: `Antes de esa hora ya hay una Entrada (${fmt(ant)}) sin salida. Registra primero esa salida.` } };
+    if (tipo === 'salida' && (!ant || ant.tipo !== 'entrada'))
+      return { status: 409, body: { error: ant ? `El registro anterior (${fmt(ant)}) es una Salida: falta su Entrada.` : 'No hay una Entrada anterior para esta Salida.' } };
+    if (sig && sig.tipo === tipo)
+      return { status: 409, body: { error: `Después de esa hora ya hay una ${tipo === 'entrada' ? 'Entrada' : 'Salida'} (${fmt(sig)}). La secuencia quedaría duplicada.` } };
+    const data = { lat: null, lng: null, locationId: null, locationName: 'Registro manual', inGeofence: false,
+                   origen: 'manual', manual: { por: u.username, nombre: u.name, motivo, registrado: new Date().toISOString() },
+                   dispositivo: { tipo: 'manual', os: '', navegador: '', autorizado: true } };
+    if (tipo === 'salida') {
+      const horas = horasSalida(ant.ts, ts);
+      Object.assign(data, horas);
+      const v = await validarJobHours(b.jobHours, horas.totalHours);
+      if (v.error) return { status: 400, body: { error: v.error, requiere_horas: true, totalHours: horas.totalHours } };
+      data.jobHours = v.jobHours;
+    }
+    const id = uuidv4();
+    await c.query('INSERT INTO kiosco_registros (id, worker_tid, worker_name, tipo, ts, data) VALUES ($1,$2,$3,$4,$5,$6)',
+                  [id, workerId, w.name, tipo, ts, JSON.stringify(data)]);
+    console.log(`[MANUAL] ${u.username} agregó ${tipo} de ${w.name} (${ts}): ${motivo}`);
+    return { status: 200, body: { success: true, record: { id, workerId, workerName: w.name, type: tipo, timestamp: ts, ...data } } };
+  });
+  res.status(resultado.status).json(resultado.body);
+}));
+
+// horas de la jornada para una salida manual (para mostrarlas antes de guardar)
+app.get('/api/records/manual/horas', aw(async (req, res) => {
+  const { workerId, timestamp } = req.query;
+  const f = new Date(timestamp || ''); if (!workerId || isNaN(f)) return res.json({ totalHours: null });
+  const ant = (await db.q("SELECT tipo, ts FROM kiosco_registros WHERE worker_tid = $1 AND ts < $2 ORDER BY ts DESC LIMIT 1", [workerId, f.toISOString()])).rows[0];
+  if (!ant || ant.tipo !== 'entrada') return res.json({ totalHours: null, sin_entrada: true });
+  res.json({ ...horasSalida(ant.ts, f.toISOString()), entrada: ant.ts });
+}));
+
 // Completar un registro (horas por Job al salir) o edición del administrador
 app.patch('/api/records/:id', aw(async (req, res) => {
   const b = { ...req.body };

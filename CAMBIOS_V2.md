@@ -478,3 +478,52 @@ respaldo) y en el servidor solo como huella cifrada.
   - con 0 horas → no se registra;
   - con ADMIN 2 h + 652-50 6 h → **salida registrada con sus horas** y la ventana se
     cierra.
+
+---
+
+# v2.16 — Registros manuales (solo administrador, con contraseña)
+
+## Botón "➕ Registro manual" (Reportes)
+- **Solo lo ve el usuario con rol de administrador.** El servidor también rechaza a
+  cualquier otro rol, incluido RRHH.
+- **En la ventana se captura:**
+  - **trabajador**, **tipo** (Entrada / Salida) y **fecha y hora** (no se aceptan fechas
+    futuras);
+  - **motivo**, obligatorio;
+  - **la contraseña del administrador**, obligatoria en cada registro. Si es incorrecta,
+    no se guarda y queda en el log.
+- **Salida manual:**
+  - muestra la **jornada calculada** desde la entrada anterior (total, base y extra);
+  - pide la **distribución de horas** (ADMIN + Jobs en WIP de la Suite), con las mismas
+    reglas de la v2.15: no puede quedar en 0, no puede exceder la jornada y solo admite
+    Jobs en WIP.
+
+## Validaciones de la secuencia
+- **No se acepta una Entrada** si antes de esa hora hay otra Entrada sin salida.
+- **No se acepta una Salida** sin una Entrada anterior.
+- **No se acepta** si justo después ya existe un registro del mismo tipo (quedaría
+  duplicado).
+- Usa el mismo candado por trabajador que los registros normales.
+
+## Cómo queda el registro
+- **Ubicación "Registro manual"**, con `origen: manual` y quién lo registró, su nombre, el
+  motivo y la fecha de captura.
+- **La salida** guarda sus horas calculadas y su distribución por Job, igual que una normal.
+- **Se ve en Reportes** como cualquier registro. La Suite lo toma igual para asistencia y
+  horas.
+
+## API
+- `POST /api/records/manual` (adminUser, password, workerId, type, timestamp, motivo,
+  jobHours).
+- `GET /api/records/manual/horas` (jornada calculada para una salida).
+
+## Probado (PostgreSQL local)
+- **Usuario RRHH** → rechazado. **Contraseña incorrecta** → rechazada.
+- **Sin motivo** → rechazado. **Fecha futura** → rechazada.
+- **Salida sin entrada** → rechazada.
+- **Entrada manual** hace 30 h → guardada como "Registro manual". **Otra entrada** sin salida
+  intermedia → rechazada.
+- **Salida manual** 9 h después: jornada 9 h. Sin horas → rechazada. Con 652-50 7 h + ADMIN
+  2 h → guardada, con su distribución y "por: admin".
+- **En pantalla:** el botón solo aparece al administrador, y la ventana avisa cuando falta
+  la entrada.

@@ -584,6 +584,35 @@
   </div>
 </div>
 
+<!-- v2.16: registro manual (solo administrador, con contraseña) -->
+<div class="modal-overlay" id="manualModal">
+  <div class="modal" style="max-width:540px;">
+    <div class="modal-drag"></div>
+    <div class="modal-title">➕ Registro manual de asistencia</div>
+    <div style="font-size:12.5px;color:var(--ink-soft);margin:-6px 0 12px">Para entradas o salidas que no se registraron. Solo el administrador del sistema; queda marcado como <b>Registro manual</b> con tu usuario y el motivo.</div>
+    <div class="form-group"><label>Trabajador</label><select id="manWorker" onchange="manHoras()"></select></div>
+    <div class="grid-2">
+      <div class="form-group"><label>Tipo</label><select id="manTipo" onchange="manHoras()"><option value="entrada">🟢 Entrada</option><option value="salida">🔴 Salida</option></select></div>
+      <div class="form-group"><label>Fecha y hora</label><input type="datetime-local" id="manFecha" onchange="manHoras()"></div>
+    </div>
+    <div id="manJobsBox" style="display:none;border:1.5px solid var(--border);border-radius:var(--r);padding:10px 12px;margin-bottom:12px">
+      <div id="manHorasTxt" style="font-size:13px;margin-bottom:8px"></div>
+      <div id="manJobs"></div>
+      <div style="display:flex;gap:6px;margin-top:8px">
+        <input type="text" id="manJobBuscar" list="jhJobsWip" placeholder="Agregar Job en WIP…" autocomplete="off" style="flex:1;padding:8px;border:1.5px solid var(--border);border-radius:var(--r)">
+        <button type="button" class="btn btn-secondary btn-sm" onclick="manAgregarJob()">+ Agregar</button>
+      </div>
+    </div>
+    <div class="form-group"><label>Motivo</label><input type="text" id="manMotivo" placeholder="ej. Olvidó registrar su salida; falla de red…" maxlength="200"></div>
+    <div class="form-group"><label>Tu contraseña de administrador</label><input type="password" id="manPw" autocomplete="current-password"></div>
+    <div id="manError" class="alert alert-error" style="display:none"></div>
+    <div class="modal-actions" style="display:flex;gap:8px">
+      <button class="btn btn-secondary" onclick="closeModal('manualModal')">Cancelar</button>
+      <button class="btn btn-primary btn-full" onclick="manGuardar()">Guardar registro</button>
+    </div>
+  </div>
+</div>
+
 <!-- ADMIN: editar distribución de horas por Job (desde Reportes → Jobs por Día) -->
 <div class="modal-overlay" id="adminJobHoursModal">
   <div class="modal" style="max-width:520px;">
@@ -1054,8 +1083,11 @@
     </div>
 
     <div class="panel" id="panel-reportes">
-      <div class="section-title">📊 Reportes de Asistencia</div>
-      <div class="section-sub">Registro general y reporte semanal por trabajador</div>
+      <div style="display:flex;align-items:flex-start;gap:10px;flex-wrap:wrap">
+        <div><div class="section-title">📊 Reportes de Asistencia</div>
+        <div class="section-sub">Registro general y reporte semanal por trabajador</div></div>
+        <button class="btn btn-primary btn-sm" id="btnRegistroManual" onclick="manAbrir()" style="margin-left:auto;display:none">➕ Registro manual</button>
+      </div>
 
       <!-- Sub-tabs -->
       <div style="display:flex;gap:4px;margin-bottom:20px;border-bottom:1.5px solid var(--border);">
@@ -2436,6 +2468,61 @@ async function ctgImportar(){
   await ctgPrevia();
 }
 
+// ═══ v2.16 — Registro manual (administrador + contraseña) ═══
+let _manTotal = null;
+async function manAbrir() {
+  if (!currentUser || currentUser.role !== 'admin') return toast('Solo el administrador del sistema puede agregar registros manuales.', 'error');
+  try { if (!workers || !workers.length) await loadWorkers(); } catch (e) {}
+  document.getElementById('manWorker').innerHTML = '<option value="">— Selecciona —</option>' + (workers || []).slice().sort((a, b) => (a.name || '').localeCompare(b.name || '')).map(w => `<option value="${w.id}">${w.name}</option>`).join('');
+  const ahora = new Date(); ahora.setMinutes(ahora.getMinutes() - ahora.getTimezoneOffset());
+  document.getElementById('manFecha').value = ahora.toISOString().slice(0, 16);
+  ['manMotivo', 'manPw', 'manJobBuscar'].forEach(id => document.getElementById(id).value = '');
+  document.getElementById('manTipo').value = 'entrada';
+  document.getElementById('manError').style.display = 'none';
+  document.getElementById('manJobs').innerHTML = manFila('ADMIN');
+  if (!_jobsWip) { try { const r = await fetch('/api/jobs-wip'); if (r.ok) _jobsWip = await r.json(); } catch (e) {} }
+  document.getElementById('jhJobsWip').innerHTML = (_jobsWip || []).map(j => `<option value="${j.job}">${j.job} · ${j.cliente}${j.descripcion ? ' · ' + j.descripcion.slice(0, 50) : ''}</option>`).join('');
+  manHoras();
+  document.getElementById('manualModal').classList.add('open');
+}
+function manFila(job) {
+  return `<div class="man-fila" style="display:flex;align-items:center;justify-content:space-between;gap:8px;padding:6px 2px;border-bottom:1px solid var(--border)">
+    <span class="job-tag">${job}</span><div style="display:flex;align-items:center"><input type="number" class="man-h" data-job="${job}" min="0" step="0.5" value="0" style="width:90px;padding:6px;text-align:right">
+    ${job === 'ADMIN' ? '' : `<button type="button" onclick="this.closest('.man-fila').remove()" style="border:none;background:none;color:var(--red);font-size:16px;cursor:pointer">✕</button>`}</div></div>`;
+}
+function manAgregarJob() {
+  const inp = document.getElementById('manJobBuscar'); const txt = String(inp.value || '').split('·')[0].trim().toUpperCase(); if (!txt) return;
+  const j = (_jobsWip || []).find(x => x.job === txt);
+  if (!j) return toast(`"${txt}" no es un Job en WIP`, 'error');
+  if (document.querySelector(`.man-h[data-job="${j.job}"]`)) return toast(`${j.job} ya está`, 'error');
+  document.getElementById('manJobs').insertAdjacentHTML('beforeend', manFila(j.job)); inp.value = '';
+}
+async function manHoras() {
+  const tipo = document.getElementById('manTipo').value, box = document.getElementById('manJobsBox');
+  box.style.display = tipo === 'salida' ? '' : 'none'; _manTotal = null;
+  if (tipo !== 'salida') return;
+  const w = document.getElementById('manWorker').value, f = document.getElementById('manFecha').value, txt = document.getElementById('manHorasTxt');
+  if (!w || !f) { txt.textContent = 'Elige el trabajador y la fecha para calcular la jornada.'; return; }
+  const d = await (await fetch(`/api/records/manual/horas?workerId=${encodeURIComponent(w)}&timestamp=${encodeURIComponent(new Date(f).toISOString())}`)).json();
+  if (d.sin_entrada) { txt.innerHTML = '<span style="color:var(--red)">⚠ No hay una Entrada anterior a esa hora: registra primero la entrada.</span>'; return; }
+  _manTotal = d.totalHours;
+  txt.innerHTML = `Jornada desde la entrada del ${new Date(d.entrada).toLocaleString('es-MX')}: <b>${d.totalHours} h</b> (base ${d.baseHours}, extra ${d.extraHours}). Reparte las horas:`;
+}
+async function manGuardar() {
+  const err = document.getElementById('manError'); err.style.display = 'none';
+  const tipo = document.getElementById('manTipo').value, f = document.getElementById('manFecha').value;
+  const jobHours = tipo === 'salida' ? [...document.querySelectorAll('.man-h')].map(i => ({ job: i.dataset.job, hours: parseFloat(i.value) || 0 })).filter(x => x.hours > 0) : undefined;
+  const body = { adminUser: currentUser.username, password: document.getElementById('manPw').value, workerId: document.getElementById('manWorker').value,
+                 type: tipo, timestamp: f ? new Date(f).toISOString() : '', motivo: document.getElementById('manMotivo').value, jobHours };
+  if (!body.password) { err.textContent = 'Escribe tu contraseña de administrador'; err.style.display = 'block'; return; }
+  const r = await fetch('/api/records/manual', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+  const d = await r.json();
+  if (!r.ok) { err.textContent = d.error || 'No se pudo guardar'; err.style.display = 'block'; document.getElementById('manPw').value = ''; return; }
+  closeModal('manualModal');
+  toast(`✓ ${tipo === 'entrada' ? 'Entrada' : 'Salida'} manual registrada para ${d.record.workerName}`, 'success');
+  try { if (typeof loadReports === 'function') loadReports(); } catch (e) {}
+}
+
 function mostrarLoginAdmin(si){
   document.getElementById('loginWorkerBox').style.display = si ? 'none' : '';
   document.getElementById('loginAdminBox').style.display = si ? '' : 'none';
@@ -2566,6 +2653,7 @@ function showPanel(id) {
   if (id === 'notificaciones') loadNotifications();
   if (id === 'dispositivos') cargarDispositivos();
   if (id === 'pausas') cargarPausasAdmin();
+  if (id === 'reportes') { const bm = document.getElementById('btnRegistroManual'); if (bm) bm.style.display = currentUser && currentUser.role === 'admin' ? '' : 'none'; }
   if (id === 'contingencia') { document.getElementById('ctgVista').innerHTML = ''; document.getElementById('ctgBtn').style.display = 'none'; }
 }
 
