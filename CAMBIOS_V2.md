@@ -652,3 +652,29 @@ Checador ZKTeco ──(red local)──► BioTime (PC de planta, PostgreSQL :74
   cada día. Hora local correcta (−06:00).
 - **Al abrir el kiosco,** Delfino vio "Tu salida del lunes 12 de octubre… (5 días
   pendientes)". Al guardar pasó al martes 13 (4 pendientes).
+
+---
+
+# v2.19 — Coordenadas idénticas a otro día: registro rechazado
+
+- **Si la ubicación es idéntica** (al sexto decimal) a la de un registro del mismo trabajador
+  en **otro día**, el registro ahora se **rechaza**. Antes solo quedaba como alerta.
+  - **Motivo:** un GPS real no repite el punto exacto en días distintos; una app de ubicación
+    simulada sí.
+- **El trabajador ve:** "Coordenadas idénticas a un registro del AAAA-MM-DD (…): posible
+  ubicación simulada. Desactiva cualquier aplicación de ubicación simulada y vuelve a
+  intentar; si el problema sigue, avisa a RRHH."
+- **En 🛡 Ubicación** aparece como **Rechazado**.
+- **Parámetro nuevo** (solo admin): "Rechazar coordenadas idénticas a otro día", activado por
+  defecto. Si se desactiva, vuelve a ser solo una alerta.
+- **Excepciones (sin cambio):**
+  - **computadoras:** ubican por Wi-Fi y es normal que repitan el punto;
+  - **Smart Work:** no valida ubicación.
+- **Si alguien queda bloqueado por un falso positivo,** el administrador puede capturar su
+  registro con "➕ Registro manual".
+
+## Probado
+- **Coordenadas exactas** de un registro de hace 3 días → **403 rechazado** y evento
+  "Rechazado".
+- **Coordenadas ligeramente distintas** → aceptado.
+- **Parámetro desactivado** → guardado.

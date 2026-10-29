@@ -739,7 +739,8 @@ app.get('/api/config/registro', (req, res) => res.json({ espera_minutos: ESPERA_
 //  · marca (sin rechazar) "viajes imposibles" y coordenadas idénticas en días distintos.
 // Rechazos y alertas quedan en kiosco_geo_eventos para revisión (pestaña 🛡 Ubicación).
 const GEO_DEFAULT = { precision_max_m: 100, antiguedad_max_s: 30, rechazar_precision_cero: true,
-                      precision_en_computadora: false, velocidad_max_kmh: 120, distancia_min_viaje_km: 5 };
+                      precision_en_computadora: false, velocidad_max_kmh: 120, distancia_min_viaje_km: 5,
+                      rechazar_coordenadas_identicas: true };     // v2.19: coordenadas idénticas → rechazo
 async function geoCfg() { return { ...GEO_DEFAULT, ...((await db.getConfig('geo_validacion', {})) || {}) }; }
 function distanciaM(lat1, lng1, lat2, lng2) {
   const R = 6371000, rad = (x) => x * Math.PI / 180;
@@ -799,7 +800,13 @@ async function validarUbicacion(workerId, b, tipoDisp) {
   const igual = esCompu ? null : (await db.q(`SELECT ts FROM kiosco_registros WHERE worker_tid = $1 AND data->>'lat' IS NOT NULL AND data->>'lat' <> ''
                               AND round((data->>'lat')::numeric, 6) = $2::numeric AND round((data->>'lng')::numeric, 6) = $3::numeric
                               AND substr(ts, 1, 10) <> $4 LIMIT 1`, [workerId, lat6, lng6, hoy])).rows[0];
-  if (igual) alertas.push(`Coordenadas idénticas a un registro del ${igual.ts.slice(0, 10)} (${lat6}, ${lng6}): posible ubicación simulada`);
+  if (igual) {
+    const msg = `Coordenadas idénticas a un registro del ${igual.ts.slice(0, 10)} (${lat6}, ${lng6}): posible ubicación simulada`;
+    // v2.19: un GPS real no repite el punto exacto en días distintos → se rechaza (configurable)
+    if (cfg.rechazar_coordenadas_identicas)
+      return rechazo(`${msg}. Desactiva cualquier aplicación de ubicación simulada y vuelve a intentar; si el problema sigue, avisa a RRHH.`);
+    alertas.push(msg);
+  }
   return { ok: true, inGeofence: true, location: mejor.l, distancia_m: Math.round(mejor.d), alertas, w, datos };
 }
 
@@ -817,7 +824,7 @@ app.put('/api/geo/config', aw(async (req, res) => {
   const b = req.body || {}, cfg = await geoCfg();
   for (const k of ['precision_max_m', 'antiguedad_max_s', 'velocidad_max_kmh', 'distancia_min_viaje_km'])
     if (k in b) { const v = parseFloat(b[k]); if (isNaN(v) || v <= 0) return res.status(400).json({ error: `Valor inválido: ${k}` }); cfg[k] = v; }
-  for (const k of ['rechazar_precision_cero', 'precision_en_computadora']) if (k in b) cfg[k] = !!b[k];
+  for (const k of ['rechazar_precision_cero', 'precision_en_computadora', 'rechazar_coordenadas_identicas']) if (k in b) cfg[k] = !!b[k];
   await db.setConfig('geo_validacion', cfg);
   res.json({ success: true, config: cfg });
 }));

@@ -1042,7 +1042,7 @@
     </div>
 
     <div class="panel" id="panel-geo">
-      <div class="page-header"><h2>🛡 Validación de ubicación</h2><p>El servidor revisa cada registro: distancia real al punto de registro, precisión y antigüedad de la ubicación. Aquí se ven los registros <b>rechazados</b> y las <b>alertas</b> (viaje imposible, coordenadas idénticas) para revisión.</p></div>
+      <div class="page-header"><h2>🛡 Validación de ubicación</h2><p>El servidor revisa cada registro: distancia real al punto de registro, precisión, antigüedad de la ubicación y coordenadas idénticas a otro día (posible ubicación simulada). Aquí se ven los registros <b>rechazados</b> y las <b>alertas</b> (viaje imposible) para revisión.</p></div>
       <div class="card">
         <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:flex-end;margin-bottom:12px">
           <div class="form-group" style="margin:0"><label>Desde</label><input type="date" id="geoDesde"></div>
@@ -1061,6 +1061,7 @@
           <div class="form-group" style="margin:0"><label>Velocidad máx. (km/h)</label><input type="number" id="gcVel" min="10" step="10" style="width:110px"></div>
           <label style="display:flex;gap:6px;align-items:center;font-size:13px"><input type="checkbox" id="gcCero"> Rechazar precisión de 0 m</label>
           <label style="display:flex;gap:6px;align-items:center;font-size:13px"><input type="checkbox" id="gcCompu"> Exigir precisión también en computadoras</label>
+          <label style="display:flex;gap:6px;align-items:center;font-size:13px"><input type="checkbox" id="gcIdent"> Rechazar coordenadas idénticas a otro día</label>
           <button class="btn btn-secondary btn-sm" id="gcGuardar" onclick="guardarGeoCfg()">Guardar</button>
         </div>
         <div style="font-size:11.5px;color:var(--ink-soft);margin-top:8px">Las computadoras ubican por Wi-Fi/red y su precisión suele ser baja: por eso, de forma predeterminada, a ellas solo se les valida la distancia. Smart Work no valida ubicación.</div>
@@ -2596,6 +2597,7 @@ async function cargarGeo() {
     document.getElementById('gcPrec').value = c.precision_max_m; document.getElementById('gcEdad').value = c.antiguedad_max_s;
     document.getElementById('gcVel').value = c.velocidad_max_kmh; document.getElementById('gcCero').checked = !!c.rechazar_precision_cero;
     document.getElementById('gcCompu').checked = !!c.precision_en_computadora;
+    document.getElementById('gcIdent').checked = c.rechazar_coordenadas_identicas !== false;
     const admin = currentUser && currentUser.role === 'admin';
     document.querySelectorAll('#geoCfgCard input').forEach(i => i.disabled = !admin);
     document.getElementById('gcGuardar').style.display = admin ? '' : 'none';
@@ -2604,7 +2606,8 @@ async function cargarGeo() {
 async function guardarGeoCfg() {
   const body = { precision_max_m: document.getElementById('gcPrec').value, antiguedad_max_s: document.getElementById('gcEdad').value,
                  velocidad_max_kmh: document.getElementById('gcVel').value, rechazar_precision_cero: document.getElementById('gcCero').checked,
-                 precision_en_computadora: document.getElementById('gcCompu').checked };
+                 precision_en_computadora: document.getElementById('gcCompu').checked,
+                 rechazar_coordenadas_identicas: document.getElementById('gcIdent').checked };
   const r = await fetch('/api/geo/config', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
   const d = await r.json(); if (!r.ok) return toast(d.error || 'No se pudo guardar', 'error');
   toast('Parámetros de ubicación guardados', 'success');
