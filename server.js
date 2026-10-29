@@ -1146,6 +1146,117 @@ app.get('/api/records/manual/horas', aw(async (req, res) => {
   res.json({ ...horasSalida(ant.ts, f.toISOString()), entrada: ant.ts });
 }));
 
+// ─── CHECADOR ZKTeco / BioTime (v2.18) ─────────────────────────────────────────
+// Un "puente" en la PC de la planta (donde corre BioTime) lee las checadas de la base de
+// BioTime y las envía aquí cada pocos minutos (POST /api/checador/marcas, con la clave
+// CHECADOR_KEY). Cada checada se relaciona con un trabajador (emp_code → tid) y se convierte
+// en Entrada o Salida alternando con su último registro. Las salidas quedan con
+// "horas_pendientes" para que el trabajador reparta sus horas por Job en el kiosco.
+const CHECADOR_KEY = (process.env.CHECADOR_KEY || '').trim();
+const CHECADOR_DOBLE_MIN = Number(process.env.CHECADOR_DOBLE_MIN || 3);   // checadas a menos de N min = repetida
+
+async function procesarMarcasChecador() {
+  const pend = (await db.q(`SELECT m.*, mp.worker_tid FROM kiosco_checador_marcas m
+                            LEFT JOIN kiosco_checador_map mp ON mp.emp_code = m.emp_code
+                            WHERE m.estado IN ('pendiente','sin_trabajador') ORDER BY m.punch_time`)).rows;
+  let procesadas = 0;
+  for (const m of pend) {
+    if (!m.worker_tid) { if (m.estado !== 'sin_trabajador') await db.q(`UPDATE kiosco_checador_marcas SET estado='sin_trabajador' WHERE id=$1`, [m.id]); continue; }
+    const w = await trabajadorPorId(m.worker_tid);
+    if (!w) continue;
+    await db.tx(async (c) => {
+      await c.query('SELECT pg_advisory_xact_lock(hashtext($1))', ['kiosco-registro:' + w.id]);
+      const ant = (await c.query('SELECT id, tipo, ts, data FROM kiosco_registros WHERE worker_tid = $1 AND ts <= $2 ORDER BY ts DESC LIMIT 1', [w.id, m.punch_time])).rows[0];
+      // checada repetida (dos lecturas seguidas) → se ignora
+      if (ant && Math.abs(Date.parse(m.punch_time) - Date.parse(ant.ts)) < CHECADOR_DOBLE_MIN * 60000) {
+        await c.query(`UPDATE kiosco_checador_marcas SET estado='duplicada', registro_id=$2 WHERE id=$1`, [m.id, ant.id]); return;
+      }
+      // misma checada ya registrada (p. ej. reenvío) → se liga
+      const ya = (await c.query(`SELECT id FROM kiosco_registros WHERE data->>'checador_id' = $1 LIMIT 1`, [m.id])).rows[0];
+      if (ya) { await c.query(`UPDATE kiosco_checador_marcas SET estado='procesada', registro_id=$2 WHERE id=$1`, [m.id, ya.id]); return; }
+      // alterna: si lo anterior es una entrada del mismo día (o de hace menos de 16 h) → salida
+      const esSalida = ant && ant.tipo === 'entrada' && (Date.parse(m.punch_time) - Date.parse(ant.ts)) < 16 * 3600000;
+      const tipo = esSalida ? 'salida' : 'entrada';
+      const data = { lat: null, lng: null, locationId: null, locationName: 'Checador planta', inGeofence: true, origen: 'checador',
+                     checador_id: m.id, checador: { emp_code: m.emp_code, terminal_sn: m.terminal_sn, verify_type: m.verify_type,
+                                                    metodo: ({ 1: 'huella', 15: 'rostro', 4: 'tarjeta', 3: 'contraseña' })[m.verify_type] || String(m.verify_type ?? '') },
+                     dispositivo: { tipo: 'checador', os: 'ZKTeco', navegador: m.terminal_sn || '', autorizado: true } };
+      if (esSalida) { Object.assign(data, horasSalida(ant.ts, m.punch_time)); data.horas_pendientes = true; data.jobHours = []; }
+      const id = uuidv4();
+      await c.query('INSERT INTO kiosco_registros (id, worker_tid, worker_name, tipo, ts, data) VALUES ($1,$2,$3,$4,$5,$6)',
+                    [id, w.id, w.name, tipo, m.punch_time, JSON.stringify(data)]);
+      await c.query(`UPDATE kiosco_checador_marcas SET estado='procesada', registro_id=$2, tipo=$3 WHERE id=$1`, [m.id, id, tipo]);
+      procesadas++;
+    });
+  }
+  return procesadas;
+}
+
+app.post('/api/checador/marcas', aw(async (req, res) => {
+  if (!CHECADOR_KEY) return res.status(503).json({ error: 'Falta configurar CHECADOR_KEY en el servidor del kiosco' });
+  if ((req.headers['x-checador-key'] || '') !== CHECADOR_KEY) return res.status(401).json({ error: 'Clave del checador incorrecta' });
+  const marcas = Array.isArray((req.body || {}).marcas) ? req.body.marcas : [];
+  let nuevas = 0;
+  for (const mk of marcas.slice(0, 5000)) {
+    const code = String(mk.emp_code || '').trim(); const t = new Date(mk.punch_time || '');
+    if (!code || isNaN(t)) continue;
+    const r = await db.q(`INSERT INTO kiosco_checador_marcas (id, emp_code, emp_nombre, punch_time, terminal_sn, verify_type, origen_id)
+                          VALUES ($1,$2,$3,$4,$5,$6,$7) ON CONFLICT (emp_code, punch_time) DO NOTHING`,
+                         [uuidv4(), code, String(mk.nombre || '').trim() || null, t.toISOString(), mk.terminal_sn || null,
+                          mk.verify_type == null ? null : Number(mk.verify_type), mk.id == null ? null : String(mk.id)]);
+    nuevas += r.rowCount;
+  }
+  // nombres para la relación (sugerencia automática por nombre la primera vez)
+  const trab = await listarTrabajadores();
+  for (const mk of marcas) {
+    const code = String(mk.emp_code || '').trim(); if (!code) continue;
+    const ex = (await db.q('SELECT 1 FROM kiosco_checador_map WHERE emp_code = $1', [code])).rows[0];
+    if (ex || !mk.nombre) continue;
+    const t = normNombre(mk.nombre);
+    const w = trab.filter(x => { const xs = new Set(normNombre(x.name)); return t.length >= 2 && t.every(p => xs.has(p)); });
+    if (w.length === 1) await db.q('INSERT INTO kiosco_checador_map (emp_code, worker_tid, emp_nombre) VALUES ($1,$2,$3) ON CONFLICT DO NOTHING', [code, w[0].id, mk.nombre]);
+  }
+  const procesadas = await procesarMarcasChecador();
+  await db.setConfig('checador_ultimo_envio', { fecha: new Date().toISOString(), recibidas: marcas.length, nuevas, procesadas,
+                                                 puente: String(req.headers['x-puente-version'] || ''), ip: (req.headers['x-forwarded-for'] || req.socket.remoteAddress || '').toString().split(',')[0] });
+  res.json({ success: true, recibidas: marcas.length, nuevas, procesadas });
+}));
+
+app.get('/api/checador/estado', aw(async (req, res) => {
+  const ult = await db.getConfig('checador_ultimo_envio', null);
+  const cuentas = Object.fromEntries((await db.q(`SELECT estado, count(*)::int AS n FROM kiosco_checador_marcas GROUP BY estado`)).rows.map(r => [r.estado, r.n]));
+  const codigos = (await db.q(`SELECT m.emp_code, max(m.emp_nombre) AS emp_nombre, count(*)::int AS marcas, max(m.punch_time) AS ultima,
+                                      mp.worker_tid FROM kiosco_checador_marcas m LEFT JOIN kiosco_checador_map mp ON mp.emp_code = m.emp_code
+                               GROUP BY m.emp_code, mp.worker_tid ORDER BY (mp.worker_tid IS NULL) DESC, m.emp_code`)).rows;
+  // días con número impar de checadas procesadas (faltó entrada o salida) en los últimos 14 días
+  const desde = new Date(Date.now() - 14 * 86400000).toISOString();
+  // el día se cuenta en hora local de la planta (una salida a las 18:00 ya es otro día en UTC)
+  const impares = (await db.q(`SELECT mp.worker_tid, max(m.emp_nombre) AS emp_nombre, to_char((m.punch_time::timestamptz AT TIME ZONE $2)::date, 'YYYY-MM-DD') AS dia, count(*)::int AS n
+                               FROM kiosco_checador_marcas m JOIN kiosco_checador_map mp ON mp.emp_code = m.emp_code
+                               WHERE m.estado IN ('procesada','duplicada') AND m.punch_time >= $1
+                                 AND (m.punch_time::timestamptz AT TIME ZONE $2)::date >= ((now() AT TIME ZONE $2)::date - 14)
+                               GROUP BY mp.worker_tid, dia
+                               HAVING count(*) FILTER (WHERE m.estado = 'procesada') % 2 = 1 ORDER BY dia DESC`, [new Date(Date.now() - 16 * 86400000).toISOString(), TZ_LOCAL])).rows;
+  const pendHoras = (await db.q(`SELECT worker_name, count(*)::int AS n FROM kiosco_registros WHERE (data->>'horas_pendientes')::boolean IS TRUE GROUP BY worker_name ORDER BY n DESC`)).rows;
+  res.json({ ultimo_envio: ult, cuentas, codigos, impares, horas_pendientes: pendHoras, clave_configurada: !!CHECADOR_KEY });
+}));
+
+app.put('/api/checador/map', aw(async (req, res) => {
+  const { emp_code, worker_tid, emp_nombre } = req.body || {};
+  if (!emp_code) return res.status(400).json({ error: 'Falta el número del checador' });
+  if (!worker_tid) { await db.q('DELETE FROM kiosco_checador_map WHERE emp_code = $1', [String(emp_code)]); return res.json({ success: true }); }
+  await db.q(`INSERT INTO kiosco_checador_map (emp_code, worker_tid, emp_nombre, updated_at) VALUES ($1,$2,$3,now())
+              ON CONFLICT (emp_code) DO UPDATE SET worker_tid = EXCLUDED.worker_tid, updated_at = now()`, [String(emp_code), String(worker_tid), emp_nombre || null]);
+  const procesadas = await procesarMarcasChecador();          // las marcas que esperaban relación se procesan ya
+  res.json({ success: true, procesadas });
+}));
+
+// salidas del checador con horas por repartir (el kiosco se las pide al trabajador)
+app.get('/api/records/horas-pendientes', aw(async (req, res) => {
+  const r = await db.q(`SELECT * FROM kiosco_registros WHERE worker_tid = $1 AND (data->>'horas_pendientes')::boolean IS TRUE ORDER BY ts`, [String(req.query.workerId || '')]);
+  res.json(r.rows.map(registro));
+}));
+
 // Completar un registro (horas por Job al salir) o edición del administrador
 app.patch('/api/records/:id', aw(async (req, res) => {
   const b = { ...req.body };
@@ -1156,6 +1267,7 @@ app.patch('/api/records/:id', aw(async (req, res) => {
   if ('type' in b) { extra.tipo = b.type; }
   if ('timestamp' in b) { extra.ts = b.timestamp; }
   delete b.id; delete b.workerId; delete b.workerName; delete b.type; delete b.timestamp;
+  if ('jobHours' in b) b.horas_pendientes = false;            // v2.18: salida del checador ya distribuida
   params.push(JSON.stringify(b));
   for (const [col, v] of Object.entries(extra)) { params.push(v); sets.push(`${col} = $${params.length}`); }
   const r = await db.q(`UPDATE kiosco_registros SET ${sets.join(', ')} WHERE id = $1 RETURNING *`, params);

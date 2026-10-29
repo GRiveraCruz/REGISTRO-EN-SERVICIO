@@ -587,3 +587,68 @@ respaldo) y en el servidor solo como huella cifrada.
 - **Computadora sin precisión, dentro del radio** → aceptada.
 - **Desde la pantalla:** una entrada con ±12 m quedó en "Planta"; una pausa con precisión
   0 m fue rechazada y apareció en la pestaña de Ubicación.
+
+---
+
+# v2.18 — Integración del checador ZKTeco (BioTime)
+
+## Cómo funciona
+```
+Checador ZKTeco ──(red local)──► BioTime (PC de planta, PostgreSQL :7496)
+                                      │  puente_biotime.py (cada 5 min, solo lectura)
+                                      ▼
+                     Kiosco (Railway) ── POST /api/checador/marcas (HTTPS + CHECADOR_KEY)
+```
+- **El puente** (carpeta `puente-biotime`, entregada aparte) se instala en la **PC donde corre
+  BioTime**.
+  - Lee las checadas nuevas de la tabla `iclock_transaction` y los nombres de
+    `personnel_employee`.
+  - Las envía al kiosco cada 5 minutos.
+  - No abre puertos ni expone la base de BioTime.
+- **El kiosco** guarda cada checada (sin duplicados: empleado + fecha y hora) y la convierte en
+  **Entrada o Salida** del trabajador relacionado:
+  - alterna con su último registro: si lo anterior es una entrada de hace menos de 16 h, es
+    salida; si no, entrada;
+  - **dos checadas a menos de 3 minutos** cuentan como **repetidas** y se ignoran
+    (`CHECADOR_DOBLE_MIN`);
+  - ubicación **"Checador planta"**, con el método (huella, rostro, tarjeta) y el número de
+    serie del equipo;
+  - **las salidas** calculan horas base y extra, y quedan con **horas pendientes de
+    repartir**.
+
+## Horas por Job de las salidas del checador
+- **Cuando el trabajador abre el kiosco en su celular**, se le pide repartir las horas de cada
+  salida pendiente ("Tu salida del lunes 12 de octubre se registró en el checador de
+  planta…"), un día tras otro, con ADMIN y los Jobs en WIP.
+
+## Pestaña nueva "⏱ Checador" (admin y RRHH)
+- **Estado del puente:** último envío (en rojo si pasó más de 30 min), y checadas
+  registradas, repetidas, sin trabajador y pendientes.
+- **Relación de empleados** (número del checador → trabajador de Control de Personal):
+  - **se propone sola por nombre** la primera vez;
+  - las que falten se eligen de la lista;
+  - al relacionar, sus checadas en espera se registran de inmediato.
+- **Para revisar:**
+  - **días con checadas impares** de los últimos 14 días, contados en hora local (faltó
+    entrada o salida). Se completan con "➕ Registro manual";
+  - **trabajadores con horas por repartir.**
+
+## Configuración en Railway (servicio del kiosco)
+- `CHECADOR_KEY`: clave larga y secreta. La misma va en el `config.ini` del puente.
+- Opcional: `CHECADOR_DOBLE_MIN` (por defecto 3).
+
+## API
+- `POST /api/checador/marcas` (puente, con `X-Checador-Key`)
+- `GET /api/checador/estado`
+- `PUT /api/checador/map`
+- `GET /api/records/horas-pendientes`
+
+## Probado (PostgreSQL local, con las 269 checadas de la Semana 42 en una base tipo BioTime)
+- **Puente:** detectó la tabla, envió las 269 checadas en 3 lotes y la segunda ejecución
+  ya no reenvió nada. Clave incorrecta → 401.
+- **Relación automática por nombre:** 3 personas (Delfino Hernandez, Luz Muñoz, Elias Mata).
+  Las demás quedaron en espera ("sin trabajador").
+- **Delfino:** 07:05 → 17:04 del 12-oct como entrada y salida (9.97 h, horas pendientes) y así
+  cada día. Hora local correcta (−06:00).
+- **Al abrir el kiosco,** Delfino vio "Tu salida del lunes 12 de octubre… (5 días
+  pendientes)". Al guardar pasó al martes 13 (4 pendientes).

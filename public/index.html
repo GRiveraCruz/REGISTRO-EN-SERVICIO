@@ -544,7 +544,7 @@
   <div class="modal" style="max-width:520px;">
     <div class="modal-drag"></div>
     <div class="modal-title">🗂 Distribución de Horas por Job</div>
-    <div style="font-size:12.5px;color:var(--ink-soft);margin:-6px 0 12px">Reparte tus horas del día <b>antes</b> de registrar tu salida. La salida se registra al confirmar.</div>
+    <div id="jhSubtitulo" style="font-size:12.5px;color:var(--ink-soft);margin:-6px 0 12px">Reparte tus horas del día <b>antes</b> de registrar tu salida. La salida se registra al confirmar.</div>
     <div id="jobHoursSummary" style="background:var(--surface);border:1.5px solid var(--border);border-radius:var(--r);padding:12px 16px;margin-bottom:18px;display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px;">
       <div>
         <div style="font-size:11px;color:var(--ink-soft);font-weight:700;text-transform:uppercase;letter-spacing:.5px;">Total de horas del día</div>
@@ -1030,6 +1030,17 @@
     </div>
 
     <!-- PANEL: Reportes -->
+    <div class="panel" id="panel-checador">
+      <div class="page-header"><h2>⏱ Checador ZKTeco (planta)</h2><p>Checadas que envía el puente instalado en la PC de BioTime. Cada checada se convierte en Entrada o Salida del trabajador relacionado; las salidas le piden al trabajador repartir sus horas por Job en el kiosco.</p></div>
+      <div class="card"><div id="chkEstado" style="font-size:13px"></div></div>
+      <div class="card">
+        <div style="font-weight:700;margin-bottom:6px">Relación de empleados del checador</div>
+        <div style="font-size:12px;color:var(--ink-soft);margin-bottom:8px">Número del empleado en el checador → trabajador de Control de Personal. Se propone sola por nombre; corrige las que falten. Las checadas sin relación quedan en espera y se procesan al relacionarlas.</div>
+        <div class="table-wrap"><table><thead><tr><th>No. checador</th><th>Nombre en el checador</th><th>Trabajador</th><th>Checadas</th><th>Última</th></tr></thead><tbody id="chkMap"></tbody></table></div>
+      </div>
+      <div class="card"><div style="font-weight:700;margin-bottom:6px">Para revisar</div><div id="chkRevisar" style="font-size:13px"></div></div>
+    </div>
+
     <div class="panel" id="panel-geo">
       <div class="page-header"><h2>🛡 Validación de ubicación</h2><p>El servidor revisa cada registro: distancia real al punto de registro, precisión y antigüedad de la ubicación. Aquí se ven los registros <b>rechazados</b> y las <b>alertas</b> (viaje imposible, coordenadas idénticas) para revisión.</p></div>
       <div class="card">
@@ -2599,6 +2610,43 @@ async function guardarGeoCfg() {
   toast('Parámetros de ubicación guardados', 'success');
 }
 
+// ═══ v2.18 — Horas pendientes de salidas registradas en el checador ZKTeco ═══
+let _pendHoras = [];
+async function revisarHorasPendientes() {
+  if (!currentUser || currentUser.role !== 'worker') return;
+  try { _pendHoras = await (await fetch('/api/records/horas-pendientes?workerId=' + encodeURIComponent(currentUser.id))).json(); } catch (e) { return; }
+  if (!_pendHoras.length) return;
+  const r = _pendHoras[0];
+  openJobHoursModal(r.id, r.totalHours ?? 0);
+  const f = new Date(r.timestamp).toLocaleDateString('es-MX', { weekday: 'long', day: '2-digit', month: 'long' });
+  document.getElementById('jhSubtitulo').innerHTML = `⏱ Tu salida del <b>${f}</b> se registró en el <b>checador de planta</b>. Reparte las horas de ese día en ADMIN o en los Jobs que trabajaste.` + (_pendHoras.length > 1 ? ` <b>(${_pendHoras.length} días pendientes)</b>` : '');
+}
+
+// ═══ v2.18 — Panel del checador ZKTeco ═══
+async function cargarChecador() {
+  let d; try { d = await (await fetch('/api/checador/estado')).json(); } catch (e) { return toast('No se pudo leer el estado del checador', 'error'); }
+  try { if (!workers || !workers.length) await loadWorkers(); } catch (e) {}
+  const u = d.ultimo_envio, c = d.cuentas || {};
+  const hace = u ? Math.round((Date.now() - Date.parse(u.fecha)) / 60000) : null;
+  document.getElementById('chkEstado').innerHTML = (!d.clave_configurada ? '<div class="alert alert-error">⚠ Falta la variable <b>CHECADOR_KEY</b> en el servidor del kiosco: el puente no podrá enviar checadas.</div>' : '')
+    + `<div style="display:flex;gap:18px;flex-wrap:wrap">
+      <div><div style="font-size:11px;color:var(--ink-soft)">ÚLTIMO ENVÍO DEL PUENTE</div><b style="color:${hace == null || hace > 30 ? 'var(--red)' : '#15803d'}">${u ? new Date(u.fecha).toLocaleString('es-MX') + ` (hace ${hace} min)` : 'nunca'}</b>${u ? `<div style="font-size:11px;color:var(--ink-soft)">${u.recibidas} recibidas · ${u.nuevas} nuevas · ${u.procesadas} registradas${u.puente ? ' · puente ' + u.puente : ''}</div>` : ''}</div>
+      <div><div style="font-size:11px;color:var(--ink-soft)">CHECADAS</div><b>${c.procesada || 0}</b> registradas · ${c.duplicada || 0} repetidas · <span style="color:${c.sin_trabajador ? 'var(--red)' : 'inherit'}">${c.sin_trabajador || 0} sin trabajador</span> · ${c.pendiente || 0} pendientes</div></div>`;
+  const opts = sel => '<option value="">— Sin relacionar —</option>' + (workers || []).slice().sort((a, b) => (a.name || '').localeCompare(b.name || '')).map(w => `<option value="${w.id}" ${w.id === sel ? 'selected' : ''}>${w.name}</option>`).join('');
+  document.getElementById('chkMap').innerHTML = (d.codigos || []).map(x => `<tr style="${x.worker_tid ? '' : 'background:rgba(220,38,38,.05)'}"><td><strong>${x.emp_code}</strong></td><td>${x.emp_nombre || ''}</td>
+      <td><select onchange="chkRelacionar('${x.emp_code}', this.value, '${(x.emp_nombre || '').replace(/'/g, '')}')">${opts(x.worker_tid)}</select></td><td>${x.marcas}</td><td style="font-size:12px">${x.ultima ? new Date(x.ultima).toLocaleString('es-MX') : ''}</td></tr>`).join('')
+    || '<tr><td colspan="5" style="text-align:center;color:var(--ink-soft);padding:20px">Aún no llegan checadas del puente</td></tr>';
+  const imp = d.impares || [], ph = d.horas_pendientes || [];
+  document.getElementById('chkRevisar').innerHTML = (imp.length ? `<div style="margin-bottom:8px"><b>Días con checadas impares</b> (faltó la entrada o la salida, últimos 14 días): ${imp.map(x => `${x.emp_nombre || x.worker_tid} — ${x.dia} (${x.n})`).join(' · ')}<div style="font-size:11.5px;color:var(--ink-soft)">Complétalos con "➕ Registro manual" en Reportes.</div></div>` : '<div style="color:#15803d;margin-bottom:8px">✓ Sin días con checadas impares</div>')
+    + (ph.length ? `<div><b>Trabajadores con horas por repartir</b> (salidas del checador): ${ph.map(x => `${x.worker_name} (${x.n})`).join(' · ')}<div style="font-size:11.5px;color:var(--ink-soft)">Se les pide al abrir el kiosco en su celular.</div></div>` : '<div style="color:#15803d">✓ Sin horas pendientes de repartir</div>');
+}
+async function chkRelacionar(emp_code, worker_tid, emp_nombre) {
+  const r = await fetch('/api/checador/map', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ emp_code, worker_tid, emp_nombre }) });
+  const d = await r.json(); if (!r.ok) return toast(d.error || 'No se pudo guardar', 'error');
+  toast(worker_tid ? `Relación guardada${d.procesadas ? ` · ${d.procesadas} checada(s) registradas` : ''}` : 'Relación quitada', 'success');
+  cargarChecador();
+}
+
 function mostrarLoginAdmin(si){
   document.getElementById('loginWorkerBox').style.display = si ? 'none' : '';
   document.getElementById('loginAdminBox').style.display = si ? '' : 'none';
@@ -2644,6 +2692,7 @@ async function startApp() {
     _registroSesion = null; detenerEspera();
     await verificarDispositivoSesion();                   // v2.6
     await cargarEstadoPausa();                            // v2.9
+    setTimeout(revisarHorasPendientes, 800);              // v2.18: salidas del checador sin repartir
     try { ESPERA_MIN = (await (await fetch('/api/config/registro')).json()).espera_minutos ?? 5; } catch (e) {}
     // Pre-load this worker's records so entrada lookup works for job hours modal
     const r = await fetch(`/api/records?workerId=${currentUser.id}`);
@@ -2694,6 +2743,7 @@ function buildNav() {
     if (['admin','rrhh'].includes(currentUser.role)) navItems.push({ id:'pausas', icon:'☕', label:'Pausas' });   // v2.9: solo admin y RRHH
     if (['admin','rrhh'].includes(currentUser.role)) navItems.push({ id:'contingencia', icon:'📥', label:'Contingencia' });   // v2.12
     if (['admin','rrhh'].includes(currentUser.role)) navItems.push({ id:'geo', icon:'🛡', label:'Ubicación' });               // v2.17
+    if (['admin','rrhh'].includes(currentUser.role)) navItems.push({ id:'checador', icon:'⏱', label:'Checador' });            // v2.18
   }
 
   navItems.forEach(item => {
@@ -2731,6 +2781,7 @@ function showPanel(id) {
   if (id === 'dispositivos') cargarDispositivos();
   if (id === 'pausas') cargarPausasAdmin();
   if (id === 'geo') cargarGeo();
+  if (id === 'checador') cargarChecador();
   if (id === 'reportes') { const bm = document.getElementById('btnRegistroManual'); if (bm) bm.style.display = currentUser && currentUser.role === 'admin' ? '' : 'none'; }
   if (id === 'contingencia') { document.getElementById('ctgVista').innerHTML = ''; document.getElementById('ctgBtn').style.display = 'none'; }
 }
@@ -3142,6 +3193,7 @@ let pendingJobHoursRecordId = null;
 let pendingJobHoursTotal    = 0;
 
 function openJobHoursModal(recordId, totalHours) {
+  { const bt = document.getElementById('jhBtnGuardar'); if (bt) bt.textContent = recordId ? '✅ Guardar distribución' : '🔴 Registrar salida con estas horas'; }   // v2.18
   pendingJobHoursRecordId = recordId;
   pendingJobHoursTotal    = totalHours;
 
@@ -3262,7 +3314,9 @@ async function saveJobHours() {
       if (rec) rec.jobHours = jobHours;
       toast('Distribución de horas guardada ✓', 'success');
       closeModal('jobHoursModal');
+      document.getElementById('jhSubtitulo').innerHTML = 'Reparte tus horas del día <b>antes</b> de registrar tu salida. La salida se registra al confirmar.';
       loadMyRecords();
+      setTimeout(revisarHorasPendientes, 600);                    // v2.18: siguiente día pendiente del checador
     } else { toast('Error al guardar la distribución', 'error'); }
   } catch(e) { toast('Error de conexión', 'error'); }
 }

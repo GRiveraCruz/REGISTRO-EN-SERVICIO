@@ -92,6 +92,28 @@ CREATE TABLE IF NOT EXISTS kiosco_geo_eventos (
   data        JSONB NOT NULL DEFAULT '{}'::jsonb
 );
 CREATE INDEX IF NOT EXISTS ix_kiosco_geo_eventos_ts ON kiosco_geo_eventos (ts);
+-- v2.18: checador ZKTeco (BioTime) — marcas recibidas del puente y relación de empleados
+CREATE TABLE IF NOT EXISTS kiosco_checador_marcas (
+  id          VARCHAR PRIMARY KEY,
+  emp_code    VARCHAR NOT NULL,
+  emp_nombre  VARCHAR,
+  punch_time  VARCHAR NOT NULL,          -- ISO UTC
+  terminal_sn VARCHAR,
+  verify_type INTEGER,
+  origen_id   VARCHAR,                   -- id de la marca en BioTime
+  estado      VARCHAR NOT NULL DEFAULT 'pendiente',   -- pendiente | procesada | duplicada | sin_trabajador
+  registro_id VARCHAR,
+  tipo        VARCHAR,
+  recibida    TIMESTAMP DEFAULT now(),
+  UNIQUE (emp_code, punch_time)
+);
+CREATE INDEX IF NOT EXISTS ix_kiosco_checador_marcas_estado ON kiosco_checador_marcas (estado);
+CREATE TABLE IF NOT EXISTS kiosco_checador_map (
+  emp_code   VARCHAR PRIMARY KEY,
+  worker_tid VARCHAR NOT NULL,
+  emp_nombre VARCHAR,
+  updated_at TIMESTAMP DEFAULT now()
+);
 CREATE TABLE IF NOT EXISTS kiosco_dispositivos (
   id            VARCHAR PRIMARY KEY,
   worker_tid    VARCHAR NOT NULL,
