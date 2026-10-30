@@ -678,3 +678,25 @@ Checador ZKTeco ──(red local)──► BioTime (PC de planta, PostgreSQL :74
   "Rechazado".
 - **Coordenadas ligeramente distintas** → aceptado.
 - **Parámetro desactivado** → guardado.
+
+---
+
+# v2.20 — El trabajador ya no ve el motivo de los rechazos por sospecha de GPS simulado
+
+- **Rechazos por sospecha de ubicación simulada** (coordenadas idénticas a otro día y precisión
+  de 0 m):
+  - el trabajador solo ve un **mensaje genérico**: *"No se pudo completar el registro.
+    Inténtalo de nuevo en unos minutos; si el problema continúa, contacta a tu
+    supervisor."*;
+  - ya no se menciona la ubicación simulada, las coordenadas ni las apps.
+- **El motivo completo queda para RRHH y el administrador** en **🛡 Ubicación**, con la marca
+  **"Sospecha de GPS simulado"** (`data.sospecha = true`).
+- **Los rechazos por mala señal o ubicación** siguen mostrando su motivo al trabajador, porque
+  necesita saber qué corregir: precisión baja, ubicación vieja, fuera del punto de
+  registro o sin ubicación.
+- **El registro sigue rechazado** igual que antes. Solo cambia lo que ve el trabajador.
+
+## Probado
+- **Coordenadas idénticas y precisión 0 m** → el trabajador ve el mensaje genérico; el evento
+  queda con el motivo completo y "Sospecha de GPS simulado".
+- **Precisión ±500 m** → el trabajador ve el motivo normal.

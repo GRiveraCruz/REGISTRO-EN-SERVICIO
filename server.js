@@ -761,12 +761,15 @@ async function validarUbicacion(workerId, b, tipoDisp) {
   const cfg = await geoCfg();
   const lat = parseFloat(b.lat), lng = parseFloat(b.lng), acc = (b.accuracy == null || b.accuracy === '') ? null : parseFloat(b.accuracy);
   const datos = { lat, lng, accuracy: acc, dispositivo: tipoDisp };
-  const rechazo = async (motivo) => { await geoEvento(w, 'rechazado', motivo, datos); return { ok: false, error: motivo, geo_rechazo: true }; };
+  // v2.20: en los rechazos por SOSPECHA de ubicación simulada, el trabajador solo ve un mensaje
+  // genérico; el motivo completo queda en kiosco_geo_eventos (pestaña 🛡 Ubicación) para RRHH.
+  const MSG_GENERICO = 'No se pudo completar el registro. Inténtalo de nuevo en unos minutos; si el problema continúa, contacta a tu supervisor.';
+  const rechazo = async (motivo, sospecha) => { await geoEvento(w, 'rechazado', motivo, { ...datos, sospecha: !!sospecha }); return { ok: false, error: sospecha ? MSG_GENERICO : motivo, geo_rechazo: true }; };
   if (isNaN(lat) || isNaN(lng)) return rechazo('No se recibió tu ubicación. Activa la ubicación del dispositivo e inténtalo de nuevo.');
   const esCompu = tipoDisp === 'computadora';
   if (!esCompu || cfg.precision_en_computadora) {
     if (acc == null || isNaN(acc)) return rechazo('No se recibió la precisión de tu ubicación. Actualiza la página e inténtalo de nuevo.');
-    if (cfg.rechazar_precision_cero && acc <= 0) return rechazo('La ubicación recibida no es válida (precisión de 0 m). Desactiva cualquier aplicación de ubicación simulada.');
+    if (cfg.rechazar_precision_cero && acc <= 0) return rechazo('Precisión de 0 m: posible ubicación simulada', true);
     if (acc > cfg.precision_max_m) return rechazo(`Tu ubicación no es lo bastante precisa (±${Math.round(acc)} m; máximo ±${cfg.precision_max_m} m). Activa el GPS o la "ubicación precisa" y vuelve a intentar al aire libre o cerca de una ventana.`);
   }
   // antigüedad: se mide con el reloj del propio dispositivo (geoTs vs clientNow): no influye su desfase
@@ -803,8 +806,7 @@ async function validarUbicacion(workerId, b, tipoDisp) {
   if (igual) {
     const msg = `Coordenadas idénticas a un registro del ${igual.ts.slice(0, 10)} (${lat6}, ${lng6}): posible ubicación simulada`;
     // v2.19: un GPS real no repite el punto exacto en días distintos → se rechaza (configurable)
-    if (cfg.rechazar_coordenadas_identicas)
-      return rechazo(`${msg}. Desactiva cualquier aplicación de ubicación simulada y vuelve a intentar; si el problema sigue, avisa a RRHH.`);
+    if (cfg.rechazar_coordenadas_identicas) return rechazo(msg, true);
     alertas.push(msg);
   }
   return { ok: true, inGeofence: true, location: mejor.l, distancia_m: Math.round(mejor.d), alertas, w, datos };

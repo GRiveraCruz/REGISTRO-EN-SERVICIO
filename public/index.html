@@ -2585,7 +2585,7 @@ async function cargarGeo() {
   try { L = await (await fetch('/api/geo/eventos?' + q)).json(); } catch (e) { return toast('No se pudieron cargar los eventos', 'error'); }
   document.getElementById('geoBody').innerHTML = L.map(e => { const d = e.data || {};
     return `<tr><td style="white-space:nowrap">${new Date(e.ts).toLocaleString('es-MX')}</td><td><strong>${e.worker_name || e.worker_tid}</strong></td>
-      <td>${e.accion === 'rechazado' ? '<span class="badge badge-red">Rechazado</span>' : '<span class="badge badge-amber">Alerta</span>'}</td>
+      <td>${e.accion === 'rechazado' ? '<span class="badge badge-red">Rechazado</span>' : '<span class="badge badge-amber">Alerta</span>'}${d.sospecha ? '<div style="font-size:11px;color:var(--red);font-weight:700;margin-top:3px">Sospecha de GPS simulado</div>' : ''}</td>
       <td style="font-size:12.5px">${e.motivo}</td><td style="font-size:12px">${d.accuracy != null && !isNaN(d.accuracy) ? '±' + Math.round(d.accuracy) + ' m' : '—'}</td>
       <td style="font-size:12px">${d.dispositivo || ''}</td>
       <td>${d.lat != null && !isNaN(d.lat) ? `<a target="_blank" href="https://maps.google.com/?q=${d.lat},${d.lng}">ver</a>` : '—'}</td></tr>`; }).join('')
