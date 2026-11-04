@@ -592,9 +592,15 @@
     <div style="font-size:12.5px;color:var(--ink-soft);margin:-6px 0 12px">Para entradas o salidas que no se registraron. Solo el administrador del sistema; queda marcado como <b>Registro manual</b> con tu usuario y el motivo.</div>
     <div class="form-group"><label>Trabajador</label><select id="manWorker" onchange="manHoras()"></select></div>
     <div class="grid-2">
-      <div class="form-group"><label>Tipo</label><select id="manTipo" onchange="manHoras()"><option value="entrada">🟢 Entrada</option><option value="salida">🔴 Salida</option></select></div>
-      <div class="form-group"><label>Fecha y hora</label><input type="datetime-local" id="manFecha" onchange="manHoras()"></div>
+      <div class="form-group"><label>Tipo</label><select id="manTipo" onchange="manHoras()"><option value="dia">📅 Día completo (entrada y salida)</option><option value="entrada">🟢 Solo Entrada</option><option value="salida">🔴 Solo Salida</option></select></div>
+      <div class="form-group" id="manFechaBox"><label>Fecha y hora</label><input type="datetime-local" id="manFecha" onchange="manHoras()"></div>
+      <div class="form-group" id="manDiaBox"><label>Fecha del día</label><input type="date" id="manDia" onchange="manHoras()"></div>
     </div>
+    <div class="grid-2" id="manHorasDiaBox">
+      <div class="form-group"><label>Hora de entrada</label><input type="time" id="manEntrada" value="07:00" onchange="manHoras()"></div>
+      <div class="form-group"><label>Hora de salida</label><input type="time" id="manSalida" value="17:00" onchange="manHoras()"></div>
+    </div>
+    <div id="manDiaInfo" style="font-size:12px;margin:-4px 0 10px"></div>
     <div id="manJobsBox" style="display:none;border:1.5px solid var(--border);border-radius:var(--r);padding:10px 12px;margin-bottom:12px">
       <div id="manHorasTxt" style="font-size:13px;margin-bottom:8px"></div>
       <div id="manJobs"></div>
@@ -2522,7 +2528,8 @@ async function manAbrir() {
   const ahora = new Date(); ahora.setMinutes(ahora.getMinutes() - ahora.getTimezoneOffset());
   document.getElementById('manFecha').value = ahora.toISOString().slice(0, 16);
   ['manMotivo', 'manPw', 'manJobBuscar'].forEach(id => document.getElementById(id).value = '');
-  document.getElementById('manTipo').value = 'entrada';
+  document.getElementById('manTipo').value = 'dia';
+  { const ay = new Date(Date.now() - 86400000); document.getElementById('manDia').value = ymd(ay); }
   document.getElementById('manError').style.display = 'none';
   document.getElementById('manJobs').innerHTML = manFila('ADMIN');
   if (!_jobsWip) { try { const r = await fetch('/api/jobs-wip'); if (r.ok) _jobsWip = await r.json(); } catch (e) {} }
@@ -2544,7 +2551,27 @@ function manAgregarJob() {
 }
 async function manHoras() {
   const tipo = document.getElementById('manTipo').value, box = document.getElementById('manJobsBox');
-  box.style.display = tipo === 'salida' ? '' : 'none'; _manTotal = null;
+  // v2.23: "Día completo" registra entrada y salida de una fecha (días olvidados)
+  document.getElementById('manFechaBox').style.display = tipo === 'dia' ? 'none' : '';
+  document.getElementById('manDiaBox').style.display = tipo === 'dia' ? '' : 'none';
+  document.getElementById('manHorasDiaBox').style.display = tipo === 'dia' ? '' : 'none';
+  document.getElementById('manDiaInfo').innerHTML = '';
+  box.style.display = tipo === 'entrada' ? 'none' : ''; _manTotal = null;
+  if (tipo === 'dia') {
+    const d = document.getElementById('manDia').value, e = document.getElementById('manEntrada').value, sa = document.getElementById('manSalida').value, txt = document.getElementById('manHorasTxt');
+    if (!d || !e || !sa) { txt.textContent = 'Elige la fecha y las horas.'; return; }
+    const [eh, em] = e.split(':').map(Number), [sh, sm] = sa.split(':').map(Number);
+    let min = (sh * 60 + sm) - (eh * 60 + em); const noct = min <= 0; if (noct) min += 1440;
+    _manTotal = Math.round(min / 60 * 100) / 100;
+    txt.innerHTML = `Jornada del ${new Date(d + 'T12:00:00').toLocaleDateString('es-MX', { weekday: 'long', day: '2-digit', month: 'long' })}: <b>${_manTotal} h</b>${noct ? ' (la salida es del día siguiente)' : ''}. Reparte las horas:`;
+    // aviso si ese día ya tiene registros
+    try {
+      const w = document.getElementById('manWorker').value;
+      if (w) { const rs = await (await fetch(`/api/records?workerId=${encodeURIComponent(w)}&from=${d}&to=${d}`)).json();
+        if (rs.length) document.getElementById('manDiaInfo').innerHTML = `<span style="color:var(--red)">⚠ Ese día ya tiene ${rs.map(r => (r.type === 'entrada' ? 'Entrada ' : 'Salida ') + new Date(r.timestamp).toLocaleTimeString('es-MX', { hour: '2-digit', minute: '2-digit' })).join(', ')}. ${rs.length === 1 ? `Usa "Solo ${rs[0].type === 'entrada' ? 'Salida' : 'Entrada'}".` : 'El día ya está completo.'}</span>`; }
+    } catch (er) {}
+    return;
+  }
   if (tipo !== 'salida') return;
   const w = document.getElementById('manWorker').value, f = document.getElementById('manFecha').value, txt = document.getElementById('manHorasTxt');
   if (!w || !f) { txt.textContent = 'Elige el trabajador y la fecha para calcular la jornada.'; return; }
@@ -2556,15 +2583,16 @@ async function manHoras() {
 async function manGuardar() {
   const err = document.getElementById('manError'); err.style.display = 'none';
   const tipo = document.getElementById('manTipo').value, f = document.getElementById('manFecha').value;
-  const jobHours = tipo === 'salida' ? [...document.querySelectorAll('.man-h')].map(i => ({ job: i.dataset.job, hours: parseFloat(i.value) || 0 })).filter(x => x.hours > 0) : undefined;
+  const jobHours = tipo !== 'entrada' ? [...document.querySelectorAll('.man-h')].map(i => ({ job: i.dataset.job, hours: parseFloat(i.value) || 0 })).filter(x => x.hours > 0) : undefined;
   const body = { adminUser: currentUser.username, password: document.getElementById('manPw').value, workerId: document.getElementById('manWorker').value,
-                 type: tipo, timestamp: f ? new Date(f).toISOString() : '', motivo: document.getElementById('manMotivo').value, jobHours };
+                 type: tipo, timestamp: f ? new Date(f).toISOString() : '', motivo: document.getElementById('manMotivo').value, jobHours,
+                 dia: document.getElementById('manDia').value, entrada: document.getElementById('manEntrada').value, salida: document.getElementById('manSalida').value };
   if (!body.password) { err.textContent = 'Escribe tu contraseña de administrador'; err.style.display = 'block'; return; }
   const r = await fetch('/api/records/manual', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
   const d = await r.json();
   if (!r.ok) { err.textContent = d.error || 'No se pudo guardar'; err.style.display = 'block'; document.getElementById('manPw').value = ''; return; }
   closeModal('manualModal');
-  toast(`✓ ${tipo === 'entrada' ? 'Entrada' : 'Salida'} manual registrada para ${d.record.workerName}`, 'success');
+  toast(tipo === 'dia' ? `✓ Día ${d.dia} registrado (entrada y salida, ${d.salida.totalHours} h)` : `✓ ${tipo === 'entrada' ? 'Entrada' : 'Salida'} manual registrada para ${d.record.workerName}`, 'success');
   try { if (typeof loadReports === 'function') loadReports(); } catch (e) {}
 }
 

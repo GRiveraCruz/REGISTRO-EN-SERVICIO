@@ -1187,9 +1187,10 @@ app.post('/api/records/manual', aw(async (req, res) => {
   }
   const workerId = String(b.workerId || ''), tipo = b.type;
   if (!workerId) return res.status(400).json({ error: 'Elige el trabajador' });
-  if (!['entrada', 'salida'].includes(tipo)) return res.status(400).json({ error: 'Tipo inválido' });
+  if (!['entrada', 'salida', 'dia'].includes(tipo)) return res.status(400).json({ error: 'Tipo inválido' });
   const motivo = String(b.motivo || '').trim();
   if (motivo.length < 5) return res.status(400).json({ error: 'Escribe el motivo del registro manual' });
+  if (tipo === 'dia') return manualDiaCompleto(req, res, u, b, workerId, motivo);          // v2.23
   const f = new Date(b.timestamp || '');
   if (isNaN(f)) return res.status(400).json({ error: 'Fecha y hora inválidas' });
   if (f.getTime() > Date.now() + 60000) return res.status(400).json({ error: 'No se pueden registrar fechas futuras' });
@@ -1205,8 +1206,14 @@ app.post('/api/records/manual', aw(async (req, res) => {
       return { status: 409, body: { error: `Antes de esa hora ya hay una Entrada (${fmt(ant)}) sin salida. Registra primero esa salida.` } };
     if (tipo === 'salida' && (!ant || ant.tipo !== 'entrada'))
       return { status: 409, body: { error: ant ? `El registro anterior (${fmt(ant)}) es una Salida: falta su Entrada.` : 'No hay una Entrada anterior para esta Salida.' } };
-    if (sig && sig.tipo === tipo)
-      return { status: 409, body: { error: `Después de esa hora ya hay una ${tipo === 'entrada' ? 'Entrada' : 'Salida'} (${fmt(sig)}). La secuencia quedaría duplicada.` } };
+    if (sig && sig.tipo === tipo) {
+      const otroDia = fechaLocalTs(sig.ts) !== fechaLocalTs(ts);
+      return { status: 409, body: { error: `Después de esa hora ya hay una ${tipo === 'entrada' ? 'Entrada' : 'Salida'} (${fmt(sig)}). La secuencia quedaría duplicada.`
+        + (otroDia && tipo === 'entrada' ? ' Si es un día olvidado completo, usa el tipo "Día completo (entrada y salida)".' : '') } };
+    }
+    // v2.23: la salida debe ser del mismo día local que su entrada (o de la madrugada siguiente, turno nocturno)
+    if (tipo === 'salida' && ant && ant.tipo === 'entrada' && (Date.parse(ts) - Date.parse(ant.ts)) > 20 * 3600000)
+      return { status: 409, body: { error: `La Entrada anterior es del ${fmt(ant)}: más de 20 h antes. Esa entrada parece de otro día; si este es un día olvidado completo, usa "Día completo".` } };
     const data = { lat: null, lng: null, locationId: null, locationName: 'Registro manual', inGeofence: false,
                    origen: 'manual', manual: { por: u.username, nombre: u.name, motivo, registrado: new Date().toISOString() },
                    dispositivo: { tipo: 'manual', os: '', navegador: '', autorizado: true } };
@@ -1225,6 +1232,67 @@ app.post('/api/records/manual', aw(async (req, res) => {
   });
   res.status(resultado.status).json(resultado.body);
 }));
+
+// ─── v2.23: REGISTRO MANUAL DE UN DÍA COMPLETO (entrada + salida) ───────────────
+// Para días olvidados. Se valida contra la FECHA (día local de la planta), no solo contra el
+// registro inmediato: el día no debe tener ya entrada/salida, la salida va después de la
+// entrada (si es menor, se toma como del día siguiente: turno nocturno), y el par no puede
+// quedar encimado con los registros de otros días (antes: Entrada o nada; después: Entrada o nada).
+function fechaLocalTs(iso) { return new Date(iso).toLocaleDateString('en-CA', { timeZone: TZ_LOCAL }); }
+function horaLocalAIso(dia, hhmm, sumarDia) {
+  const base = limiteLocal(`${dia}T${hhmm}:00`, false);           // dia + hora local → UTC
+  const d = new Date(base); if (sumarDia) d.setUTCDate(d.getUTCDate() + 1);
+  return d.toISOString();
+}
+async function manualDiaCompleto(req, res, u, b, workerId, motivo) {
+  const dia = String(b.dia || '').slice(0, 10);
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(dia)) return res.status(400).json({ error: 'Elige la fecha del día a registrar' });
+  if (!/^\d{2}:\d{2}$/.test(String(b.entrada || '')) || !/^\d{2}:\d{2}$/.test(String(b.salida || '')))
+    return res.status(400).json({ error: 'Indica la hora de entrada y la de salida' });
+  const nocturno = String(b.salida) <= String(b.entrada);
+  const tsE = horaLocalAIso(dia, b.entrada, false), tsS = horaLocalAIso(dia, b.salida, nocturno);
+  if (Date.parse(tsS) > Date.now() + 60000) return res.status(400).json({ error: 'No se pueden registrar fechas u horas futuras' });
+  if ((Date.parse(tsS) - Date.parse(tsE)) > 20 * 3600000) return res.status(400).json({ error: 'La jornada no puede durar más de 20 horas' });
+  const w = await trabajadorPorId(workerId);
+  if (!w) return res.status(404).json({ error: 'Trabajador no encontrado' });
+  const fmt = (x) => new Date(x.ts).toLocaleString('es-MX', { timeZone: TZ_LOCAL });
+  const resultado = await db.tx(async (c) => {
+    await c.query('SELECT pg_advisory_xact_lock(hashtext($1))', ['kiosco-registro:' + workerId]);
+    // 1) registros que ya existen en ESE día (hora local)
+    const delDia = (await c.query(`SELECT id, tipo, ts FROM kiosco_registros WHERE worker_tid = $1 AND ts >= $2 AND ts <= $3 ORDER BY ts`,
+                    [workerId, limiteLocal(dia, false), limiteLocal(dia, true)])).rows;
+    if (delDia.length) {
+      const tiene = delDia.map(x => `${x.tipo === 'entrada' ? 'Entrada' : 'Salida'} ${fmt(x)}`).join(', ');
+      const soloE = delDia.length === 1 && delDia[0].tipo === 'entrada', soloS = delDia.length === 1 && delDia[0].tipo === 'salida';
+      return { status: 409, body: { error: `El ${dia} ya tiene registros (${tiene}). ` +
+        (soloE ? 'Le falta solo la Salida: usa el tipo "Solo Salida".' : soloS ? 'Le falta solo la Entrada: usa el tipo "Solo Entrada".' : 'El día ya está completo.') } };
+    }
+    // 2) nada encimado: entre la entrada y la salida nuevas no debe haber registros
+    const entre = (await c.query('SELECT id, tipo, ts FROM kiosco_registros WHERE worker_tid = $1 AND ts >= $2 AND ts <= $3 ORDER BY ts', [workerId, tsE, tsS])).rows;
+    if (entre.length) return { status: 409, body: { error: `Entre ${b.entrada} y ${b.salida} ya hay registros (${entre.map(x => `${x.tipo} ${fmt(x)}`).join(', ')}).` } };
+    // 3) la secuencia con los otros días sigue siendo Entrada → Salida
+    const ant = (await c.query('SELECT id, tipo, ts FROM kiosco_registros WHERE worker_tid = $1 AND ts < $2 ORDER BY ts DESC LIMIT 1', [workerId, tsE])).rows[0];
+    const sig = (await c.query('SELECT id, tipo, ts FROM kiosco_registros WHERE worker_tid = $1 AND ts > $2 ORDER BY ts ASC LIMIT 1', [workerId, tsS])).rows[0];
+    if (ant && ant.tipo === 'entrada')
+      return { status: 409, body: { error: `El registro anterior (${fmt(ant)}) es una Entrada sin salida. Registra primero la salida de ese día.` } };
+    if (sig && sig.tipo === 'salida')
+      return { status: 409, body: { error: `El registro siguiente (${fmt(sig)}) es una Salida sin entrada. Revisa ese día primero.` } };
+    // 4) horas por Job de la salida
+    const horas = horasSalida(tsE, tsS);
+    const v = await validarJobHours(b.jobHours, horas.totalHours);
+    if (v.error) return { status: 400, body: { error: v.error, requiere_horas: true, totalHours: horas.totalHours } };
+    const base = { lat: null, lng: null, locationId: null, locationName: 'Registro manual', inGeofence: false, origen: 'manual',
+                   manual: { por: u.username, nombre: u.name, motivo, registrado: new Date().toISOString(), dia_completo: dia },
+                   dispositivo: { tipo: 'manual', os: '', navegador: '', autorizado: true } };
+    const idE = uuidv4(), idS = uuidv4();
+    await c.query('INSERT INTO kiosco_registros (id, worker_tid, worker_name, tipo, ts, data) VALUES ($1,$2,$3,$4,$5,$6)', [idE, workerId, w.name, 'entrada', tsE, JSON.stringify(base)]);
+    const dataS = { ...base, ...horas, jobHours: v.jobHours };
+    await c.query('INSERT INTO kiosco_registros (id, worker_tid, worker_name, tipo, ts, data) VALUES ($1,$2,$3,$4,$5,$6)', [idS, workerId, w.name, 'salida', tsS, JSON.stringify(dataS)]);
+    console.log(`[MANUAL] ${u.username} agregó el día ${dia} de ${w.name} (${b.entrada}–${b.salida}): ${motivo}`);
+    return { status: 200, body: { success: true, dia, entrada: { id: idE, timestamp: tsE }, salida: { id: idS, timestamp: tsS, ...horas, jobHours: v.jobHours } } };
+  });
+  res.status(resultado.status).json(resultado.body);
+}
 
 // horas de la jornada para una salida manual (para mostrarlas antes de guardar)
 app.get('/api/records/manual/horas', aw(async (req, res) => {

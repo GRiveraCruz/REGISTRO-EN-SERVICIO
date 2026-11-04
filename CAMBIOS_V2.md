@@ -789,3 +789,52 @@ Checador ZKTeco ──(red local)──► BioTime (PC de planta, PostgreSQL :74
   - Ningún día queda "duplicado" ni "sin salida".
 - **El filtro 26-oct a 1-nov** incluye la salida del domingo a las 21:00 (02-nov en UTC) y la
   semana siguiente ya no la incluye.
+
+---
+
+# v2.23 — Registro manual: días olvidados completos y validación por fecha
+
+## Qué pasaba
+- **El registro manual validaba solo contra el registro inmediato anterior o siguiente.**
+- **Para capturar un día olvidado en el pasado,** la Entrada se rechazaba siempre: el siguiente
+  registro era la Entrada del día posterior ("la secuencia quedaría duplicada"), y sin esa Entrada
+  tampoco se podía capturar la Salida.
+
+## Tipo nuevo "📅 Día completo (entrada y salida)"
+Es el tipo predeterminado al abrir "➕ Registro manual".
+- **Se captura:** **fecha**, **hora de entrada** y **hora de salida**.
+  - Si la salida es menor que la entrada, se toma como del **día siguiente** (turno nocturno).
+- **Muestra la jornada calculada** y pide la **distribución de horas por Job**, igual que una
+  salida normal.
+- **Validación por FECHA** (día local de la planta):
+  - si **ese día ya tiene registros**, no se duplica. Se indica qué tiene:
+    - con solo Entrada → "usa Solo Salida";
+    - con solo Salida → "usa Solo Entrada";
+    - con ambas → "el día ya está completo";
+  - **no puede haber registros entre** la entrada y la salida nuevas;
+  - **la secuencia con los demás días se mantiene:** antes del día no puede quedar una Entrada sin
+    salida, ni después una Salida sin entrada;
+  - **no se aceptan** fechas u horas futuras ni jornadas de más de 20 h.
+- **Se guardan las dos marcas** (Entrada y Salida) en una sola operación, marcadas como "Registro
+  manual", con el motivo, el administrador que las capturó y `dia_completo`.
+- **En la ventana,** al elegir trabajador y fecha se avisa si ese día ya tiene registros.
+
+## "Solo Entrada" / "Solo Salida" (para completar un día a medias)
+- **Mensajes con fecha:** si una Entrada se rechaza porque lo siguiente es la Entrada de otro día,
+  el mensaje sugiere usar "Día completo".
+- **Salida a más de 20 h de su Entrada:** se rechaza, porque esa entrada es de otro día.
+
+## Probado
+- **Días registrados:** 19 y 21-oct completos, 22-oct solo con Entrada.
+  - Solo Entrada el 20 → rechazada, con la sugerencia de "Día completo".
+  - **Día completo el 20 (07:00–17:00)** → guardado, 10 h.
+- **Rechazos:**
+  - repetir el 20 → "el día ya está completo";
+  - día completo el 22 → "le falta solo la Salida";
+  - sin horas → pide repartirlas;
+  - fecha futura → rechazado;
+  - el 21 → "ya está completo".
+- **Aceptados:**
+  - **Solo Salida el 22** → 10 h;
+  - **nocturno el 23 (22:00–06:00)** → salida del 24, 8 h.
+- **Secuencia final:** Entrada → Salida alternadas del 19 al 24, sin huecos.
