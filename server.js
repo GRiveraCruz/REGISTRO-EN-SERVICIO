@@ -714,11 +714,26 @@ app.delete('/api/signatures/:id', aw(async (req, res) => {
 // timestamp se guarda como texto ISO (UTC), igual que antes, para que los filtros
 // "from/to" funcionen exactamente como funcionaban con los JSON.
 const registro = (r) => ({ ...r.data, id: r.id, workerId: r.worker_tid, workerName: r.worker_name, type: r.tipo, timestamp: r.ts });
+// v2.22: los filtros de fecha se interpretan en hora local de la planta (TZ_LOCAL) y se
+// convierten a UTC antes de comparar con ts. Antes "2026-10-26" a "2026-11-01T23:59:59" se
+// comparaba como texto contra horas UTC y se perdían o se colaban registros de la noche.
+function limiteLocal(v, fin) {
+  v = String(v || '').trim(); if (!v) return v;
+  const off = (() => {          // desfase de TZ_LOCAL en esa fecha (p. ej. -06:00)
+    try { const d = new Date(v.slice(0, 10) + 'T12:00:00Z');
+      const p = new Intl.DateTimeFormat('en-US', { timeZone: TZ_LOCAL, timeZoneName: 'longOffset' }).formatToParts(d).find(x => x.type === 'timeZoneName');
+      const m = /GMT([+-]\d{2}):?(\d{2})?/.exec(p ? p.value : ''); return m ? `${m[1]}:${m[2] || '00'}` : '-06:00'; } catch (e) { return '-06:00'; } })();
+  let iso;
+  if (/^\d{4}-\d{2}-\d{2}$/.test(v)) iso = v + (fin ? 'T23:59:59.999' : 'T00:00:00') + off;
+  else if (/[zZ]|[+-]\d{2}:?\d{2}$/.test(v)) iso = v;
+  else iso = v + (fin && /:59$/.test(v) ? '.999' : '') + off;
+  const d = new Date(iso); return isNaN(d) ? v : d.toISOString();
+}
 async function buscarRegistros({ workerId, from, to }) {
   const cond = [], params = [];
   if (workerId) { params.push(workerId); cond.push(`worker_tid = $${params.length}`); }
-  if (from) { params.push(from); cond.push(`ts >= $${params.length}`); }
-  if (to) { params.push(to); cond.push(`ts <= $${params.length}`); }
+  if (from) { params.push(limiteLocal(from, false)); cond.push(`ts >= $${params.length}`); }
+  if (to) { params.push(limiteLocal(to, true)); cond.push(`ts <= $${params.length}`); }
   const r = await db.q(`SELECT * FROM kiosco_registros ${cond.length ? 'WHERE ' + cond.join(' AND ') : ''} ORDER BY ts`, params);
   return r.rows.map(registro);
 }
@@ -754,13 +769,35 @@ async function geoEvento(w, accion, motivo, data, registroId) {
                [uuidv4(), w.id, w.name, new Date().toISOString(), accion, motivo, registroId || null, JSON.stringify(data || {})]);
   } catch (e) { console.warn('[GEO] evento:', e.message); }
 }
+// v2.21: medición de las 3 lecturas (no rechaza; se guarda para análisis)
+function medirMuestras(lista) {
+  const num = (v) => (v === null || v === undefined || v === '' || isNaN(parseFloat(v))) ? null : parseFloat(v);
+  const ms = (Array.isArray(lista) ? lista : []).slice(0, 5).map(m => ({
+    lat: num(m && m.lat), lng: num(m && m.lng), accuracy: num(m && m.accuracy), altitude: num(m && m.altitude),
+    altitudeAccuracy: num(m && m.altitudeAccuracy), speed: num(m && m.speed), heading: num(m && m.heading), ts: num(m && m.ts) }))
+    .filter(m => m.lat !== null && m.lng !== null);
+  if (!ms.length) return null;
+  let dmax = 0;
+  for (let i = 0; i < ms.length; i++) for (let j = i + 1; j < ms.length; j++) dmax = Math.max(dmax, distanciaM(ms[i].lat, ms[i].lng, ms[j].lat, ms[j].lng));
+  const alts = ms.map(m => m.altitude).filter(v => v !== null);
+  const r2 = (v) => Math.round(v * 100) / 100;
+  return { muestras: ms, metricas: {
+    n: ms.length, dist_max_m: r2(dmax),
+    coords_identicas: ms.length > 1 && ms.every(m => m.lat.toFixed(7) === ms[0].lat.toFixed(7) && m.lng.toFixed(7) === ms[0].lng.toFixed(7)),
+    precision_identica: ms.length > 1 && ms.every(m => m.accuracy === ms[0].accuracy),
+    con_altitud: alts.length, alt_media: alts.length ? r2(alts.reduce((a, v) => a + v, 0) / alts.length) : null,
+    alt_variacion: alts.length > 1 ? r2(Math.max(...alts) - Math.min(...alts)) : null,
+    con_velocidad: ms.filter(m => m.speed !== null).length, con_rumbo: ms.filter(m => m.heading !== null).length } };
+}
+
 async function validarUbicacion(workerId, b, tipoDisp) {
   const w = await trabajadorPorId(workerId);
   if (!w) return { ok: false, error: 'Trabajador no encontrado' };
   if (w.homeOffice) return { ok: true, homeOffice: true, alertas: [] };          // Smart Work: la ubicación no se valida
   const cfg = await geoCfg();
   const lat = parseFloat(b.lat), lng = parseFloat(b.lng), acc = (b.accuracy == null || b.accuracy === '') ? null : parseFloat(b.accuracy);
-  const datos = { lat, lng, accuracy: acc, dispositivo: tipoDisp };
+  const medicion = medirMuestras(b.geoMuestras);                               // v2.21
+  const datos = { lat, lng, accuracy: acc, dispositivo: tipoDisp, medicion: medicion ? medicion.metricas : null };
   // v2.20: en los rechazos por SOSPECHA de ubicación simulada, el trabajador solo ve un mensaje
   // genérico; el motivo completo queda en kiosco_geo_eventos (pestaña 🛡 Ubicación) para RRHH.
   const MSG_GENERICO = 'No se pudo completar el registro. Inténtalo de nuevo en unos minutos; si el problema continúa, contacta a tu supervisor.';
@@ -809,7 +846,7 @@ async function validarUbicacion(workerId, b, tipoDisp) {
     if (cfg.rechazar_coordenadas_identicas) return rechazo(msg, true);
     alertas.push(msg);
   }
-  return { ok: true, inGeofence: true, location: mejor.l, distancia_m: Math.round(mejor.d), alertas, w, datos };
+  return { ok: true, inGeofence: true, location: mejor.l, distancia_m: Math.round(mejor.d), alertas, w, datos, medicion };
 }
 
 // eventos de ubicación (rechazos y alertas) y configuración
@@ -820,6 +857,46 @@ app.get('/api/geo/eventos', aw(async (req, res) => {
   if (req.query.accion) { params.push(req.query.accion); cond.push(`accion = $${params.length}`); }
   const r = await db.q(`SELECT * FROM kiosco_geo_eventos ${cond.length ? 'WHERE ' + cond.join(' AND ') : ''} ORDER BY ts DESC LIMIT 1000`, params);
   res.json(r.rows);
+}));
+// v2.21: reporte de la medición (3 lecturas) por trabajador
+app.get('/api/geo/medicion', aw(async (req, res) => {
+  const desde = new Date((req.query.from || new Date(Date.now() - 14 * 86400000).toISOString().slice(0, 10)) + 'T00:00:00-06:00').toISOString();
+  const hasta = new Date((req.query.to || new Date().toISOString().slice(0, 10)) + 'T23:59:59.999-06:00').toISOString();
+  const r = await db.q(`SELECT worker_tid, worker_name, ts, data FROM kiosco_registros WHERE ts >= $1 AND ts <= $2
+                        AND data->'geo'->'medicion'->'metricas' IS NOT NULL ORDER BY ts`, [desde, hasta]);
+  const por = {};
+  for (const x of r.rows) {
+    const m = x.data.geo.medicion.metricas, ms = x.data.geo.medicion.muestras || [];
+    const w = por[x.worker_tid] = por[x.worker_tid] || { worker_tid: x.worker_tid, worker_name: x.worker_name, registros: 0, coords_identicas: 0,
+      precision_identica: 0, ambas: 0, sin_altitud: 0, alt_cero: 0, alts: [], dist: [], acc: [], sitios: {}, alt_dia: {} };
+    w.registros++; if (m.coords_identicas) w.coords_identicas++; if (m.precision_identica) w.precision_identica++;
+    if (m.coords_identicas && m.precision_identica) w.ambas++;
+    if (!m.con_altitud) w.sin_altitud++;
+    w.dist.push(m.dist_max_m);
+    const dia = String(x.ts).slice(0, 10);
+    for (const s of ms) {
+      if (s.accuracy !== null) w.acc.push(s.accuracy);
+      if (s.altitude !== null) {
+        w.alts.push(s.altitude); if (Math.abs(s.altitude) < 0.5) w.alt_cero++;
+        const k = s.altitude.toFixed(2); (w.alt_dia[k] = w.alt_dia[k] || new Set()).add(dia);
+      }
+    }
+    const sitio = x.data.locationName || '—'; const st = w.sitios[sitio] = w.sitios[sitio] || [];
+    if (m.alt_media !== null) st.push(m.alt_media);
+  }
+  const med = (a) => { if (!a.length) return null; const b = [...a].sort((p, q) => p - q); return Math.round(b[Math.floor(b.length / 2)] * 10) / 10; };
+  const out = Object.values(por).map(w => {
+    const altRepDias = Object.values(w.alt_dia).filter(sd => sd.size > 1).length;
+    const pct = (n) => w.registros ? Math.round(n / w.registros * 100) : 0;
+    const sospechoso = w.registros >= 3 && (pct(w.ambas) >= 50 || (w.alts.length && altRepDias > 0 && pct(w.coords_identicas) >= 50));
+    return { worker_tid: w.worker_tid, worker_name: w.worker_name, registros: w.registros,
+             pct_coords_identicas: pct(w.coords_identicas), pct_precision_identica: pct(w.precision_identica), pct_ambas: pct(w.ambas),
+             pct_sin_altitud: pct(w.sin_altitud), lecturas_altitud_cero: w.alt_cero, altitud_mediana: med(w.alts),
+             altitud_min: w.alts.length ? Math.min(...w.alts) : null, altitud_max: w.alts.length ? Math.max(...w.alts) : null,
+             altitudes_repetidas_otro_dia: altRepDias, variacion_mediana_m: med(w.dist), precision_mediana_m: med(w.acc),
+             altitud_por_sitio: Object.fromEntries(Object.entries(w.sitios).map(([k, v]) => [k, med(v)])), patron_sospechoso: sospechoso };
+  }).sort((a, b) => (b.patron_sospechoso - a.patron_sospechoso) || (b.pct_ambas - a.pct_ambas));
+  res.json({ desde, hasta, trabajadores: out });
 }));
 app.get('/api/geo/config', aw(async (req, res) => res.json(await geoCfg())));
 app.put('/api/geo/config', aw(async (req, res) => {
@@ -888,9 +965,10 @@ app.post('/api/records', aw(async (req, res) => {
   if (!geo.ok) return res.status(403).json({ error: geo.error, geo_rechazo: !!geo.geo_rechazo });
   if (!geo.homeOffice) {
     b.inGeofence = true; b.locationId = geo.location.id; b.locationName = geo.location.name || b.locationName;
-    b.geo = { distancia_m: geo.distancia_m, accuracy: geo.datos.accuracy, validado_servidor: true, alertas: geo.alertas };
+    b.geo = { distancia_m: geo.distancia_m, accuracy: geo.datos.accuracy, validado_servidor: true, alertas: geo.alertas,
+              medicion: geo.medicion || null };                                // v2.21: 3 lecturas
   }
-  delete b.geoTs; delete b.clientNow;
+  delete b.geoTs; delete b.clientNow; delete b.geoMuestras;
   // v2.10: trabajador en Smart Work → el registro se marca así (la ubicación no se valida)
   { const wHO = await trabajadorPorId(workerId); b.homeOffice = !!(wHO && wHO.homeOffice); if (b.homeOffice) { b.inGeofence = false; b.locationName = 'Smart Work'; b.locationId = null; } }
   if (geo.alertas && geo.alertas.length) for (const a of geo.alertas) await geoEvento(geo.w, 'alerta', a, { ...geo.datos, tipo }, id);
@@ -952,7 +1030,9 @@ app.post('/api/pausas', aw(async (req, res) => {
     return res.status(403).json({ error: ver.mensaje || 'Dispositivo no autorizado', dispositivo_estado: ver.estado });
   const geo = await validarUbicacion(workerId, b, ver.dispositivo.tipo);                 // v2.17
   if (!geo.ok) return res.status(403).json({ error: geo.error, geo_rechazo: !!geo.geo_rechazo });
-  if (!geo.homeOffice) { b.inGeofence = true; b.locationId = geo.location.id; b.locationName = geo.location.name || b.locationName; }
+  if (!geo.homeOffice) { b.inGeofence = true; b.locationId = geo.location.id; b.locationName = geo.location.name || b.locationName;
+                         b.geo = { distancia_m: geo.distancia_m, accuracy: geo.datos.accuracy, medicion: geo.medicion || null }; }
+  delete b.geoMuestras; delete b.geoTs; delete b.clientNow;
   const id = uuidv4(), ts = new Date().toISOString();
   if (geo.alertas && geo.alertas.length) for (const a of geo.alertas) await geoEvento(geo.w, 'alerta', a, { ...geo.datos, tipo: 'pausa ' + tipo }, id);
   const resultado = await db.tx(async (c) => {

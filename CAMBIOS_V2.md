@@ -700,3 +700,92 @@ Checador ZKTeco ──(red local)──► BioTime (PC de planta, PostgreSQL :74
 - **Coordenadas idénticas y precisión 0 m** → el trabajador ve el mensaje genérico; el evento
   queda con el motivo completo y "Sospecha de GPS simulado".
 - **Precisión ±500 m** → el trabajador ve el motivo normal.
+
+---
+
+# v2.21 — Fase de medición: 3 lecturas GPS por registro (con altitud)
+
+## Qué hace el kiosco al registrar
+- **En cada entrada, salida y pausa** (excepto Smart Work), el kiosco toma **3 lecturas de GPS con 3
+  segundos de separación**.
+  - Mientras tanto muestra "📡 Verificando ubicación… (1/3)". El registro tarda unos 6–9 segundos
+    más.
+- **Cada lectura guarda:** coordenada, **precisión**, **altitud**, precisión de la altitud,
+  **velocidad**, **rumbo** y hora.
+- **La última lectura** es la que valida el servidor, con las mismas reglas de siempre: geocerca,
+  precisión, antigüedad, coordenadas idénticas a otro día y precisión de 0 m.
+- **Esta fase NO agrega rechazos nuevos:** solo mide.
+
+## Qué se guarda en el registro (`geo.medicion`)
+- **Las lecturas** (`muestras`).
+- **Métricas:** número de lecturas, distancia máxima entre ellas, si las 3 coordenadas fueron
+  idénticas, si la precisión fue idéntica, cuántas trajeron altitud, altitud media, variación de
+  altitud y cuántas trajeron velocidad y rumbo.
+- **En los rechazos,** las métricas también quedan en el evento de 🛡 Ubicación.
+
+## Reporte nuevo en 🛡 Ubicación: "📏 Medición de lecturas GPS"
+- **Por trabajador** (mismo periodo del filtro):
+  - registros;
+  - **% con coordenadas idénticas** en las 3 lecturas;
+  - **% con precisión idéntica**;
+  - **% con ambas a la vez**;
+  - **% sin altitud** y lecturas con altitud de 0 m;
+  - **altitud mediana y rango**;
+  - **altitudes repetidas exactas en días distintos**;
+  - variación mediana entre lecturas y precisión mediana;
+  - **altitud por sitio**, para revisar la coherencia: Puebla ≈ 2,100–2,200 m, Michigan ≈ 180–200 m.
+- **"Patrón sospechoso"** (solo indicador): con 3 o más registros, la mitad o más con coordenada y
+  precisión idénticas, o coordenadas idénticas junto con altitud repetida en días distintos.
+
+## Siguiente paso
+- Con 2–3 semanas de datos se define la regla de rechazo combinada.
+
+## Probado (PostgreSQL local)
+- **Lecturas "reales"** (coordenada, precisión y altitud variando alrededor de 2,150 m) →
+  guardadas. Métricas: variación 3.45 m, altitud media 2,150.6 m, variación de altitud 1.2 m.
+  Sin patrón sospechoso.
+- **Lecturas "falsas"** (3 iguales, ±1 m, sin altitud) en 3 registros → coordenadas idénticas
+  100 %, precisión idéntica 100 %, sin altitud 100 % → **Patrón sospechoso**.
+- **Desde la pantalla:** el aviso "Verificando ubicación… (1/3)" y la entrada guardada con sus 3
+  lecturas.
+
+---
+
+# v2.22 — Corrección: horas asignadas al día equivocado (día en UTC)
+
+## Qué pasaba
+- El kiosco guarda la hora en UTC. Una salida a las **19:00 en México** queda como **01:00 del día
+  siguiente** en UTC.
+- **Reportes ▸ Distribución de horas por Job** y el reporte semanal tomaban el día del texto UTC:
+  - la salida del lunes 26 (manual, 19:00) aparecía el **martes 27**;
+  - la del martes 27 (19:30) aparecía el **miércoles 28**, donde ya estaba la salida real del 28.
+  - El lunes quedaba "Sin salida", el miércoles parecía duplicado y la tabla solo mostraba una de
+    las dos salidas.
+- **Los filtros de fecha** (de–a) también se comparaban contra la hora UTC, y se perdían o se
+  colaban registros de la noche.
+
+## Corrección
+- **El día de cada registro se calcula en hora de la planta** (America/Mexico_City), en:
+  - Distribución de horas por Job;
+  - reporte semanal por trabajador;
+  - resumen de Jobs por día;
+  - fechas predeterminadas de los filtros.
+- **El servidor interpreta los filtros de fecha en hora local** y los convierte a UTC antes de
+  comparar: `2026-10-26` = desde las 00:00 de México; `…T23:59:59` = hasta el final de ese día en
+  México.
+- **Varias salidas el mismo día:** si un día tiene más de una salida, sus horas y su distribución
+  por Job se **suman**. Antes solo se mostraba la primera.
+- **Horas extra redondeadas a 2 decimales:** ya no aparecen valores como `3.5999999999999996 h`.
+- **Los datos no cambian:** ningún registro estaba duplicado; solo se mostraban en el día
+  equivocado.
+
+## Probado
+- **Semana 44 de 2026** con las salidas del caso (26-oct 19:00 manual, 27-oct 19:30 manual,
+  28-oct 17:36 y 1-nov 21:00):
+  - Lunes 26 → 13 h (676-61);
+  - Martes 27 → 13.5 h (676-61);
+  - Miércoles 28 → 13.6 h (ADMIN 11.5 + 676-61 2.1);
+  - Domingo 1 → 13 h.
+  - Ningún día queda "duplicado" ni "sin salida".
+- **El filtro 26-oct a 1-nov** incluye la salida del domingo a las 21:00 (02-nov en UTC) y la
+  semana siguiente ya no la incluye.

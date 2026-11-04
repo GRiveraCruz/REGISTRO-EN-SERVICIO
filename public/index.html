@@ -1053,6 +1053,11 @@
         <div id="geoResumen" style="font-size:12px;color:var(--ink-soft);margin-bottom:8px"></div>
         <div class="table-wrap"><table><thead><tr><th>Fecha</th><th>Trabajador</th><th>Tipo</th><th>Motivo</th><th>Precisión</th><th>Dispositivo</th><th>Mapa</th></tr></thead><tbody id="geoBody"></tbody></table></div>
       </div>
+      <div class="card">
+        <div style="font-weight:700;margin-bottom:4px">📏 Medición de lecturas GPS (3 lecturas por registro)</div>
+        <div style="font-size:12px;color:var(--ink-soft);margin-bottom:8px">Fase de medición: no rechaza registros. En cada registro se toman 3 lecturas con 3 s de separación (coordenada, precisión, altitud, velocidad y rumbo). Un GPS real suele variar en la coordenada, la precisión o la altitud; una app de ubicación simulada suele repetir todo igual o no reportar altitud. Mismo periodo que arriba.</div>
+        <div class="table-wrap"><table><thead><tr><th>Trabajador</th><th>Registros</th><th title="Las 3 lecturas con la misma coordenada">Coord. idénticas</th><th title="Las 3 lecturas con la misma precisión">Precisión idéntica</th><th title="Coordenada y precisión idénticas a la vez">Ambas</th><th>Sin altitud</th><th>Altitud (mediana · rango)</th><th title="Mismo valor exacto de altitud en días distintos">Altitud repetida otro día</th><th>Variación mediana</th><th>Precisión mediana</th><th>Altitud por sitio</th></tr></thead><tbody id="geoMedBody"></tbody></table></div>
+      </div>
       <div class="card" id="geoCfgCard">
         <div style="font-weight:700;margin-bottom:8px">Parámetros</div>
         <div style="display:flex;gap:10px;flex-wrap:wrap;align-items:flex-end">
@@ -2564,14 +2569,42 @@ async function manGuardar() {
 }
 
 // ═══ v2.17 — Ubicación fresca para cada registro (el servidor valida precisión y antigüedad) ═══
-function posicionFresca() {
+function lecturaGPS() {
   return new Promise(resolve => {
     if (!navigator.geolocation) return resolve(null);
     navigator.geolocation.getCurrentPosition(pos => {
-      currentLat = pos.coords.latitude; currentLng = pos.coords.longitude;
-      resolve({ lat: pos.coords.latitude, lng: pos.coords.longitude, accuracy: pos.coords.accuracy, geoTs: pos.timestamp, clientNow: Date.now() });
+      const c = pos.coords;
+      resolve({ lat: c.latitude, lng: c.longitude, accuracy: c.accuracy, altitude: c.altitude, altitudeAccuracy: c.altitudeAccuracy,
+                speed: c.speed, heading: c.heading, ts: pos.timestamp });
     }, () => resolve(null), { enableHighAccuracy: true, timeout: 15000, maximumAge: 0 });
   });
+}
+// v2.21: 3 lecturas con 3 s de separación (medición: coordenada, precisión, altitud, velocidad y rumbo).
+// La última lectura es la que valida el servidor; las tres se guardan para análisis.
+const GEO_LECTURAS = 3, GEO_SEPARACION_MS = 3000;
+function geoOverlay(txt) {
+  let o = document.getElementById('geoVerificando');
+  if (!txt) { if (o) o.remove(); return; }
+  if (!o) { o = document.createElement('div'); o.id = 'geoVerificando';
+    o.style.cssText = 'position:fixed;inset:0;background:rgba(15,23,42,.55);z-index:9999;display:flex;align-items:center;justify-content:center';
+    o.innerHTML = '<div style="background:#fff;border-radius:14px;padding:22px 26px;text-align:center;min-width:240px;box-shadow:0 10px 30px rgba(0,0,0,.25)"><div style="font-size:28px">📡</div><div id="geoVerificandoTxt" style="font-weight:700;margin-top:6px"></div><div style="font-size:12px;color:#64748b;margin-top:4px">No cierres ni cambies de pantalla</div></div>';
+    document.body.appendChild(o); }
+  document.getElementById('geoVerificandoTxt').textContent = txt;
+}
+async function posicionFresca() {
+  const muestras = [];
+  try {
+    for (let i = 0; i < GEO_LECTURAS; i++) {
+      geoOverlay(`Verificando ubicación… (${i + 1}/${GEO_LECTURAS})`);
+      const m = await lecturaGPS();
+      if (m) muestras.push(m);
+      if (i < GEO_LECTURAS - 1) await new Promise(r => setTimeout(r, GEO_SEPARACION_MS));
+    }
+  } finally { geoOverlay(null); }
+  if (!muestras.length) return null;
+  const u = muestras[muestras.length - 1];
+  currentLat = u.lat; currentLng = u.lng;
+  return { lat: u.lat, lng: u.lng, accuracy: u.accuracy, geoTs: u.ts, clientNow: Date.now(), geoMuestras: muestras };
 }
 
 // ═══ v2.17 — Panel de validación de ubicación ═══
@@ -2590,6 +2623,19 @@ async function cargarGeo() {
       <td style="font-size:12px">${d.dispositivo || ''}</td>
       <td>${d.lat != null && !isNaN(d.lat) ? `<a target="_blank" href="https://maps.google.com/?q=${d.lat},${d.lng}">ver</a>` : '—'}</td></tr>`; }).join('')
     || '<tr><td colspan="7" style="text-align:center;color:var(--ink-soft);padding:22px">Sin eventos en el periodo</td></tr>';
+  try {                                                                                           // v2.21: medición
+    const M = await (await fetch('/api/geo/medicion?' + new URLSearchParams({ from: de.value, to: ha.value }))).json();
+    const fm = (v, suf) => v === null || v === undefined ? '—' : `${v}${suf || ''}`;
+    document.getElementById('geoMedBody').innerHTML = (M.trabajadores || []).map(w => `<tr style="${w.patron_sospechoso ? 'background:rgba(220,38,38,.07)' : ''}">
+      <td><strong>${w.worker_name}</strong>${w.patron_sospechoso ? '<div style="font-size:11px;color:var(--red);font-weight:700">Patrón sospechoso</div>' : ''}</td>
+      <td>${w.registros}</td><td>${w.pct_coords_identicas}%</td><td>${w.pct_precision_identica}%</td><td style="font-weight:700;color:${w.pct_ambas >= 50 ? 'var(--red)' : 'inherit'}">${w.pct_ambas}%</td>
+      <td>${w.pct_sin_altitud}%${w.lecturas_altitud_cero ? `<div style="font-size:11px;color:var(--red)">${w.lecturas_altitud_cero} lectura(s) en 0 m</div>` : ''}</td>
+      <td>${w.altitud_mediana === null ? '—' : `${w.altitud_mediana} m <span style="font-size:11px;color:var(--ink-soft)">(${Math.round(w.altitud_min)}–${Math.round(w.altitud_max)})</span>`}</td>
+      <td style="color:${w.altitudes_repetidas_otro_dia ? 'var(--red)' : 'inherit'}">${w.altitudes_repetidas_otro_dia}</td>
+      <td>${fm(w.variacion_mediana_m, ' m')}</td><td>${fm(w.precision_mediana_m, ' m')}</td>
+      <td style="font-size:12px">${Object.entries(w.altitud_por_sitio).map(([k, v]) => `${k}: ${v === null ? '—' : v + ' m'}`).join('<br>')}</td></tr>`).join('')
+      || '<tr><td colspan="11" style="text-align:center;color:var(--ink-soft);padding:18px">Aún no hay registros con medición en el periodo</td></tr>';
+  } catch (e) {}
   const r = L.filter(e => e.accion === 'rechazado').length;
   document.getElementById('geoResumen').textContent = `${L.length} evento(s) · ${r} rechazado(s) · ${L.length - r} alerta(s)`;
   try {
@@ -2684,8 +2730,8 @@ async function startApp() {
   buildNav();
 
   // Always initialize date filters so they're ready when reports panel opens
-  const today = new Date().toISOString().split('T')[0];
-  const monthAgo = new Date(Date.now() - 30*86400000).toISOString().split('T')[0];
+  const today = ymd(new Date());
+  const monthAgo = ymd(new Date(Date.now() - 30*86400000));
   const fFrom = document.getElementById('filterFrom');
   const fTo   = document.getElementById('filterTo');
   if (fFrom && !fFrom.value) fFrom.value = monthAgo;
@@ -3068,7 +3114,7 @@ async function registerRecord(type) {
           extraHours = totalHours;
         } else {
           baseHours  = Math.min(totalHours, baseLimit);
-          extraHours = Math.max(0, totalHours - baseLimit);
+          extraHours = r2h(Math.max(0, totalHours - baseLimit));
         }
       } else if (diffMs <= 0) {
         // Clock issue or duplicate — still register salida but with 0 hours
@@ -3142,7 +3188,7 @@ async function loadMyRecords() {
         <td>${dt.toLocaleDateString('es-MX')}</td>
         <td>${dt.toLocaleTimeString('es-MX')}</td>
         <td>${r.totalHours != null ? r.totalHours + ' h' : '—'}</td>
-        <td>${r.extraHours != null ? r.extraHours + ' h' : '—'}</td>
+        <td>${r.extraHours != null ? r2h(r.extraHours) + ' h' : '—'}</td>
       </tr>`;
     }).join('')}</tbody></table></div>`;
 }
@@ -3943,7 +3989,7 @@ function renderRecordsTable(recs) {
         <td><span class="badge ${r.type==='entrada'?'badge-green':'badge-red'}">${r.type==='entrada'?'Entrada':'Salida'}</span></td>
         <td>${r.totalHours != null ? r.totalHours+' h' : '—'}</td>
         <td>${r.baseHours != null ? r.baseHours+' h' : '—'}</td>
-        <td>${r.extraHours != null ? r.extraHours+' h' : '—'}</td>
+        <td>${r.extraHours != null ? r2h(r.extraHours)+' h' : '—'}</td>
         <td>${r.locationName || '—'}</td>
         <td>${r.homeOffice ? '<span class="badge badge-amber" title="Smart Work: no se valida la ubicación">🏠</span>' : `<span class="badge ${r.inGeofence?'badge-green':'badge-red'}">${r.inGeofence?'✓':'✗'}</span>`}</td>
         <td title="${r.dispositivo ? `${r.dispositivo.os} · ${r.dispositivo.navegador}${r.dispositivo.autorizado===false?' · sin control de dispositivo':''}` : 'Registro anterior al control de dispositivos'}">${r.dispositivo ? ({movil:'📱 Celular', tablet:'📟 Tablet', computadora:'💻 Computadora'}[r.dispositivo.tipo] || r.dispositivo.tipo) : '—'}</td>
@@ -4142,6 +4188,13 @@ function dateToExcelSerial(date) {
   return Math.round((date - new Date(1899, 11, 30)) / 86400000);
 }
 
+// v2.22: el día de un registro se calcula en HORA DE LA PLANTA (no en UTC). Una salida a las
+// 19:00 en México ya es el día siguiente en UTC y antes se mostraba en el día equivocado.
+const KIOSCO_TZ = 'America/Mexico_City';
+function fechaLocal(ts) { try { return new Date(ts).toLocaleDateString('en-CA', { timeZone: KIOSCO_TZ }); } catch (e) { return String(ts).slice(0, 10); } }
+function ymd(d) { return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`; }
+const r2h = v => v == null ? v : Math.round(Number(v) * 100) / 100;
+
 // Build day-by-day array for one worker given a list of records
 function buildWorkerDays(weekRecords, monday) {
   const DAY_NAMES  = ['LUNES','MARTES','MIÉRCOLES','JUEVES','VIERNES','SÁBADO','DOMINGO'];
@@ -4149,8 +4202,8 @@ function buildWorkerDays(weekRecords, monday) {
   const days = [];
   for (let i = 0; i < 7; i++) {
     const date    = new Date(monday); date.setDate(monday.getDate() + i);
-    const dateStr = date.toISOString().split('T')[0];
-    const dayRecs = weekRecords.filter(r => r.timestamp.startsWith(dateStr));
+    const dateStr = ymd(date);
+    const dayRecs = weekRecords.filter(r => fechaLocal(r.timestamp) === dateStr);
     const entrada = dayRecs.find(r => r.type === 'entrada');
     const salida  = dayRecs.find(r => r.type === 'salida');
     let totalHours = 0, baseHours = 0, extraHours = 0;
@@ -4160,7 +4213,7 @@ function buildWorkerDays(weekRecords, monday) {
     if (entrada && salida) {
       totalHours = Math.round(((new Date(salida.timestamp) - new Date(entrada.timestamp)) / 3600000) * 100) / 100;
       baseHours  = i >= 5 ? 0 : Math.min(totalHours, BASE_HOURS[i]);
-      extraHours = i >= 5 ? totalHours : Math.max(0, totalHours - BASE_HOURS[i]);
+      extraHours = r2h(i >= 5 ? totalHours : Math.max(0, totalHours - BASE_HOURS[i]));
     }
     days.push({ dayName: DAY_NAMES[i], date, dateStr, entradaTime, salidaTime, totalHours, baseHours, extraHours, isWeekend: i >= 5, hasRecord: !!(entrada || salida) });
   }
@@ -4169,9 +4222,10 @@ function buildWorkerDays(weekRecords, monday) {
 
 function jobSummaryHtml(dateStr, allRecords) {
   // Find the salida record for this day and extract jobHours
-  const salida = (allRecords || []).find(r => r.type === 'salida' && r.timestamp.startsWith(dateStr));
-  if (!salida || !salida.jobHours || !salida.jobHours.length) return '';
-  const tags = salida.jobHours.map(jh => `<span>${jh.job}: ${jh.hours}h</span>`).join('');
+  const salidas = (allRecords || []).filter(r => r.type === 'salida' && fechaLocal(r.timestamp) === dateStr);
+  const jh = salidas.flatMap(x => x.jobHours || []);
+  if (!jh.length) return '';
+  const tags = jh.map(j => `<span>${j.job}: ${j.hours}h</span>`).join('');
   return `<div class="day-jobs-summary">${tags}</div>`;
 }
 
@@ -4223,8 +4277,8 @@ async function generateWeeklyReport() {
 
   const monday = getMondayOfWeek(week, year);
   const sunday = new Date(monday); sunday.setDate(monday.getDate() + 6);
-  const fromStr = monday.toISOString().split('T')[0];
-  const toStr   = sunday.toISOString().split('T')[0];
+  const fromStr = ymd(monday);
+  const toStr   = ymd(sunday);
 
   // Reset signatures
   resetSignatureBoxes();
@@ -4517,8 +4571,8 @@ async function loadJobsReport() {
 
   const monday  = getMondayOfWeek(week, year);
   const sunday  = new Date(monday); sunday.setDate(monday.getDate() + 6);
-  const fromStr = monday.toISOString().split('T')[0];
-  const toStr   = sunday.toISOString().split('T')[0];
+  const fromStr = ymd(monday);
+  const toStr   = ymd(sunday);
 
   const r    = await fetch(`/api/records?workerId=${workerId}&from=${fromStr}&to=${toStr}T23:59:59`);
   const recs = await r.json();
@@ -4532,11 +4586,14 @@ async function loadJobsReport() {
   const days = [];
   for (let i = 0; i < 7; i++) {
     const date    = new Date(monday); date.setDate(monday.getDate() + i);
-    const dateStr = date.toISOString().split('T')[0];
-    const salida  = recs.find(rec => rec.type === 'salida' && rec.timestamp.startsWith(dateStr));
+    const dateStr = ymd(date);
+    // todas las salidas de ese día (hora local); si hubiera más de una, se suman
+    const salidasDia = recs.filter(rec => rec.type === 'salida' && fechaLocal(rec.timestamp) === dateStr);
+    const salida  = salidasDia[0];
     const jobMap  = {};
-    (salida?.jobHours || []).forEach(jh => { jobMap[jh.job] = jh.hours; });
-    days.push({ dayName: DAY_NAMES[i], date, dateStr, totalHours: salida?.totalHours || 0, jobMap, isWeekend: i >= 5, salidaId: salida?.id || null });
+    salidasDia.forEach(sx => (sx.jobHours || []).forEach(jh => { jobMap[jh.job] = r2h((jobMap[jh.job] || 0) + (Number(jh.hours) || 0)); }));
+    const totalDia = r2h(salidasDia.reduce((a, sx) => a + (Number(sx.totalHours) || 0), 0));
+    days.push({ dayName: DAY_NAMES[i], date, dateStr, totalHours: totalDia || 0, jobMap, isWeekend: i >= 5, salidaId: salida?.id || null, salidas: salidasDia.length });
   }
 
   jobsReportData = { worker, week, year, monday, sunday, days, jobs };
@@ -4664,8 +4721,8 @@ function ctrlDateRange() {
     if (!wf || !wt) return null;
     const monFrom = getMondayOfWeek(Math.min(wf,wt), year);
     const sunTo   = new Date(getMondayOfWeek(Math.max(wf,wt), year)); sunTo.setDate(sunTo.getDate() + 6);
-    from  = monFrom.toISOString().split('T')[0];
-    to    = sunTo.toISOString().split('T')[0];
+    from  = ymd(monFrom);
+    to    = ymd(sunTo);
     label = wf === wt ? `Semana ${wf} / ${year}` : `Semanas ${Math.min(wf,wt)}–${Math.max(wf,wt)} / ${year}`;
 
   } else if (ctrlMode === 'month') {
