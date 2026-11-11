@@ -35,6 +35,24 @@ const DATA_DIR = path.join(__dirname, 'data');           // solo para migrar los
 
 app.use(bodyParser.json({ limit: '5mb' }));
 app.use(bodyParser.urlencoded({ extended: true }));
+// v2.28: identificador del dispositivo en una cookie puesta por el SERVIDOR (HttpOnly, 400 días).
+// Safari (ITP) borra a los 7 días el localStorage y las cookies creadas por JavaScript, pero no las
+// cookies que envía el propio servidor; así el iPhone conserva su identidad aunque no entre a diario.
+app.set('trust proxy', 1);
+function leerCookie(req, nombre) {
+  const m = String(req.headers.cookie || '').match(new RegExp('(?:^|;\\s*)' + nombre + '=([^;]+)'));
+  return m ? decodeURIComponent(m[1]) : null;
+}
+app.use((req, res, next) => {
+  let sid = leerCookie(req, 'kiosco_sdid');
+  if (!sid || sid.length < 16) {
+    sid = crypto.randomBytes(18).toString('hex');
+    req.headers.cookie = (req.headers.cookie ? req.headers.cookie + '; ' : '') + 'kiosco_sdid=' + sid;
+  }
+  res.setHeader('Set-Cookie', `kiosco_sdid=${sid}; Max-Age=${400 * 86400}; Path=/; HttpOnly; SameSite=Lax${req.secure ? '; Secure' : ''}`);
+  req.kioscoSdid = sid;
+  next();
+});
 app.use(express.static(path.join(__dirname, 'public')));
 const upload = multer({ storage: multer.memoryStorage() });
 
@@ -293,7 +311,7 @@ app.get('/api/workers/:id/cardex', aw(async (req, res) => {
 // no puede registrar asistencia hasta que RH lo autorice. Un dispositivo autorizado
 // para un trabajador no sirve para otro, salvo que RH lo marque como "compartido"
 // (por ejemplo una tablet fija en planta). Además se detecta si es celular o computadora.
-const DEF_DISP = { control_activo: true, solo_movil: false, auto_primer_dispositivo: true };
+const DEF_DISP = { control_activo: true, solo_movil: false, auto_primer_dispositivo: true, reconocer_mismo_equipo: true };   // v2.28
 async function cfgDispositivos() { return { ...DEF_DISP, ...(await db.getConfig('dispositivos', {})) }; }
 const hashDispositivo = (id) => crypto.createHmac('sha256', PIN_SECRET).update('disp:' + String(id)).digest('hex');
 
@@ -343,13 +361,30 @@ async function verificarDispositivo(req, workerId, deviceId, info) {
   if (!deviceId || String(deviceId).length < 16)
     return { estado: 'rechazado', dispositivo: disp, mensaje: 'No se pudo identificar este dispositivo. Actualiza la página e inténtalo de nuevo.' };
   const h = hashDispositivo(deviceId);
+  const hs = req.kioscoSdid ? hashDispositivo('sdid:' + req.kioscoSdid) : null;          // v2.28: cookie del servidor
+  const hashes = [h, hs].filter(Boolean);
   return await db.tx(async (c) => {
     await c.query('SELECT pg_advisory_xact_lock(hashtext($1))', ['kiosco-disp:' + workerId]);
-    const propio = (await c.query('SELECT * FROM kiosco_dispositivos WHERE worker_tid = $1 AND device_hash = $2', [workerId, h])).rows[0];
+    // v2.28: se reconoce por el id del navegador, por la cookie del servidor o por cualquiera de sus alias
+    let propio = (await c.query(`SELECT * FROM kiosco_dispositivos WHERE worker_tid = $1 AND (device_hash = ANY($2::text[])
+                                  OR (data->'aliases') ?| $2::text[]) ORDER BY (estado = 'autorizado') DESC LIMIT 1`, [workerId, hashes])).rows[0];
     const ahora = new Date().toISOString();
+    let reconocido = null;
+    // v2.28: el iPhone perdió su id y su cookie (navegación privada, app de la pantalla de inicio, QR
+    // abierto en otra app): si el trabajador tiene UN solo celular autorizado y este es del mismo tipo
+    // (sistema, navegador y pantalla), se reconoce como el mismo equipo y se avisa a RRHH.
+    if (!propio && cfg.reconocer_mismo_equipo && categoriaDe(disp.tipo) === 'movil') {
+      const aut = (await c.query(`SELECT * FROM kiosco_dispositivos WHERE worker_tid = $1 AND estado = 'autorizado' AND ${SQL_CAT} = 'movil'`, [workerId])).rows;
+      const firma = (x) => [x && x.os, x && x.navegador, x && x.pantalla, x && x.plataforma].map(v => String(v || '').toLowerCase()).join('|');
+      const iguales = aut.filter(a => { const u = (a.data || {}).ultimo || (a.data || {}).primero || {}; return firma(u) === firma(disp) && disp.pantalla; });
+      if (aut.length === 1 && iguales.length === 1) { propio = iguales[0]; reconocido = 'mismo equipo (sistema, navegador y pantalla)'; }
+    }
     if (propio) {
+      const aliases = [...new Set([...(((propio.data || {}).aliases) || []), ...hashes.filter(x => x !== propio.device_hash)])].slice(-20);
+      const extra = { ultimo_uso: ahora, ultimo: disp, aliases };
+      if (reconocido) extra.reconocimientos = [...(((propio.data || {}).reconocimientos) || []), { fecha: ahora, motivo: reconocido, ua: disp.ua }].slice(-20);
       await c.query(`UPDATE kiosco_dispositivos SET data = data || $2, updated_at = now() WHERE id = $1`,
-                    [propio.id, JSON.stringify({ ultimo_uso: ahora, ultimo: disp })]);
+                    [propio.id, JSON.stringify(extra)]);
       if (propio.estado === 'autorizado') return { estado: 'autorizado', dispositivo: disp };
       if (propio.estado === 'rechazado')
         return { estado: 'rechazado', dispositivo: disp, mensaje: 'Recursos Humanos rechazó este dispositivo. Usa tu dispositivo autorizado o habla con RH.' };
@@ -367,7 +402,7 @@ async function verificarDispositivo(req, workerId, deviceId, info) {
     else if (!propiosAut && cfg.auto_primer_dispositivo) { estado = 'autorizado'; motivo = `primer ${NOMBRE_CAT[cat]} del trabajador`; }
     else motivo = `ya tienes ${cat === 'movil' ? 'un celular autorizado' : 'una computadora autorizada'}; solo se permite uno de cada tipo`;
     await c.query(`INSERT INTO kiosco_dispositivos (id, worker_tid, device_hash, estado, data) VALUES ($1,$2,$3,$4,$5)`,
-                  [uuidv4(), workerId, h, estado, JSON.stringify({ alta: ahora, ultimo_uso: ahora, primero: disp, ultimo: disp, motivo, categoria: cat,
+                  [uuidv4(), workerId, h, estado, JSON.stringify({ alta: ahora, ultimo_uso: ahora, primero: disp, ultimo: disp, motivo, categoria: cat, aliases: hs ? [hs] : [],
                     autorizado_por: estado === 'autorizado' ? 'automático' : null, autorizado_at: estado === 'autorizado' ? ahora : null })]);
     if (estado === 'autorizado') return { estado, dispositivo: disp, nuevo: true, mensaje: compartido ? '' : `Este ${NOMBRE_TIPO[disp.tipo].toLowerCase()} quedó registrado como tu ${NOMBRE_CAT[cat]} para registrar asistencia.` };
     return { estado, dispositivo: disp, nuevo: true,

@@ -1000,3 +1000,52 @@ Es el tipo predeterminado al abrir "➕ Registro manual".
 - **Bitácora:** el alta y la edición del radio por "rrhh" quedan registradas.
 - **En pantalla:** el mensaje del punto no asignado aparece y el botón de entrada queda
   habilitado.
+
+---
+
+# v2.28 — iPhone: el mismo celular ya no aparece como "dispositivo nuevo"
+
+## Causa
+- **El identificador del dispositivo se guardaba en `localStorage` y en una cookie creada por
+  JavaScript.**
+- **En iPhone, Safari (protección ITP) borra ambos después de 7 días sin entrar** al sitio. También
+  hay identidad distinta:
+  - en **navegación privada**;
+  - entre **Safari y el ícono de la pantalla de inicio**;
+  - cuando el QR o el enlace se abre **dentro de otra app** (WhatsApp, Facebook, lector de QR).
+- **Cada vez el kiosco veía un id nuevo** y lo dejaba como "dispositivo nuevo / pendiente".
+
+## Corrección
+1. **Cookie del servidor** `kiosco_sdid`:
+   - la envía el **servidor** (HttpOnly, 400 días, SameSite=Lax, Secure en HTTPS);
+   - Safari no aplica a estas cookies el borrado de 7 días.
+   - **El dispositivo se reconoce por el id del navegador, por esta cookie o por cualquiera de sus
+     alias** (`data.aliases`). Si el navegador perdió su id pero conserva la cookie, sigue siendo
+     el mismo dispositivo y se le agrega el alias nuevo.
+2. **Reconocer el mismo celular** (configurable, activado por defecto), para cuando se perdieron el
+   id **y** la cookie:
+   - si el trabajador tiene **un único celular autorizado** y el que entra tiene el **mismo
+     sistema, navegador, tamaño de pantalla y plataforma**, se reconoce como el mismo equipo;
+   - queda registrado en el dispositivo (`reconocimientos`, visible en Dispositivos como "🔁
+     reconocido como el mismo equipo N veces");
+   - si la pantalla o el navegador son distintos, sigue quedando pendiente de autorización.
+   - Casilla en **Dispositivos ▸ Configuración: "Reconocer el mismo celular"**.
+3. **Consejos en pantalla** cuando el dispositivo queda pendiente o rechazado:
+   - abrir el kiosco en Safari/Chrome y no dentro de otra app;
+   - en iPhone, entrar siempre por el mismo camino (Safari o el ícono de inicio);
+   - no usar navegación privada.
+
+## Probado (PostgreSQL local, User-Agent de iPhone)
+- **Primer iPhone** → autorizado.
+- **Id del navegador borrado pero misma cookie** → **autorizado** (mismo dispositivo, sin registro
+  nuevo).
+- **Sin id ni cookie, mismo modelo y pantalla** → **autorizado** por reconocimiento (queda
+  registrado).
+- **Otro tamaño de pantalla** → pendiente.
+- **Reconocimiento desactivado** → pendiente.
+- **Resultado:** el dispositivo autorizado quedó con 4 alias y 1 reconocimiento.
+
+## Recomendación al personal con iPhone
+- **Guardar el kiosco como favorito en Safari** o agregarlo a la pantalla de inicio, y **usar
+  siempre el mismo**.
+- **No abrirlo desde el lector de QR** de otras apps, ni en pestañas privadas.

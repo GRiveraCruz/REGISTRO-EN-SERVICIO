@@ -1149,6 +1149,8 @@
           <span><b>Control de dispositivos</b><br><span style="color:var(--ink-soft);font-size:12px">Cada trabajador puede tener autorizado <b>un celular</b> (o tablet) y <b>una computadora</b>. Otro dispositivo del mismo tipo queda pendiente hasta que RH lo autorice, y al autorizarlo reemplaza al anterior.</span></span></label>
         <label class="chk-plain" style="display:flex;gap:8px;align-items:flex-start;margin:8px 0;font-size:13px"><input type="checkbox" id="dcfgAuto" onchange="guardarCfgDispositivos()">
           <span><b>Autorizar automáticamente el primer dispositivo de cada tipo</b><br><span style="color:var(--ink-soft);font-size:12px">El primer celular y la primera computadora con que entra un trabajador quedan autorizados sin pasar por RH.</span></span></label>
+        <label class="chk-plain" style="display:flex;gap:8px;align-items:flex-start;margin:8px 0;font-size:13px"><input type="checkbox" id="dcfgMismo" onchange="guardarCfgDispositivos()">
+          <span><b>Reconocer el mismo celular</b> aunque el navegador haya perdido su identificador (frecuente en iPhone: navegación privada, ícono de la pantalla de inicio, QR abierto en otra app). Aplica solo si el trabajador tiene un único celular autorizado del mismo sistema, navegador y tamaño de pantalla; queda registrado en el dispositivo.</span></label>
         <label class="chk-plain" style="display:flex;gap:8px;align-items:flex-start;margin:8px 0;font-size:13px"><input type="checkbox" id="dcfgMovil" onchange="guardarCfgDispositivos()">
           <span><b>Solo desde celular o tablet</b><br><span style="color:var(--ink-soft);font-size:12px">No se permite registrar entrada o salida desde una computadora.</span></span></label>
       </div>
@@ -2365,6 +2367,18 @@ async function verificarDispositivoSesion(){
   mostrarAvisoDispositivo();
   if (_disp && _disp.estado === 'autorizado' && _disp.nuevo && _disp.mensaje) toast(_disp.mensaje, 'success');
 }
+// v2.28: consejos para que el celular no aparezca como "dispositivo nuevo"
+function consejoNavegador(){
+  const ua = navigator.userAgent || '';
+  const ios = /iPhone|iPad|iPod/.test(ua) || (/Macintosh/.test(ua) && navigator.maxTouchPoints > 1);
+  const inApp = /FBAN|FBAV|Instagram|WhatsApp|Line\/|GSA\/|Snapchat|Twitter|LinkedInApp/i.test(ua);
+  const standalone = window.navigator.standalone === true || (window.matchMedia && matchMedia('(display-mode: standalone)').matches);
+  const t = [];
+  if (inApp) t.push('Estás abriendo el kiosco <b>dentro de otra app</b> (WhatsApp, Facebook, lector de QR…). Ábrelo en <b>' + (ios ? 'Safari' : 'Chrome') + '</b>: cada app guarda su propia identidad y el celular aparece como nuevo.');
+  if (ios) t.push('En iPhone: entra siempre por el <b>mismo camino</b> (Safari o el ícono de la pantalla de inicio, no los dos) y <b>no uses navegación privada</b>.');
+  if (standalone && ios) t.push('Estás en el ícono de la pantalla de inicio: si antes entrabas por Safari, usa el mismo de siempre.');
+  return t.length ? `<div style="font-size:11.5px;margin-top:6px;padding:6px 8px;border-radius:6px;background:rgba(0,0,0,.04)">💡 ${t.join('<br>💡 ')}</div>` : '';
+}
 function mostrarAvisoDispositivo(){
   const el = document.getElementById('dispAviso'); if (!el) return;
   if (!_disp || ['autorizado','sin_control'].includes(_disp.estado)) { el.style.display = 'none'; return; }
@@ -2373,7 +2387,7 @@ function mostrarAvisoDispositivo(){
   el.style.background = rojo ? 'rgba(200,16,46,.08)' : 'rgba(245,158,11,.12)';
   el.style.border = `1px solid ${rojo ? 'rgba(200,16,46,.35)' : 'rgba(245,158,11,.5)'}`;
   el.innerHTML = `<b>${rojo ? '⛔ Dispositivo no permitido' : '⏳ Dispositivo pendiente de autorización'}</b><br>${_disp.mensaje || ''}
-    <div style="font-size:11px;color:var(--ink-soft);margin-top:4px">Puedes consultar tus permisos, órdenes de servicio y tareas desde aquí.</div>`;
+    <div style="font-size:11px;color:var(--ink-soft);margin-top:4px">Puedes consultar tus permisos, órdenes de servicio y tareas desde aquí.</div>${consejoNavegador()}`;
   if (typeof enableActionBtns === 'function' && currentUser) enableActionBtns();
 }
 
@@ -2384,6 +2398,7 @@ async function cargarDispositivos(){
   const c = _dispData.config;
   document.getElementById('dcfgControl').checked = c.control_activo;
   document.getElementById('dcfgAuto').checked = c.auto_primer_dispositivo;
+  { const e = document.getElementById('dcfgMismo'); if (e) e.checked = c.reconocer_mismo_equipo !== false; }
   document.getElementById('dcfgMovil').checked = c.solo_movil;
   const n = _dispData.dispositivos.filter(d => d.estado === 'pendiente').length;
   if (!n && document.getElementById('dispFiltro').value === 'pendiente') document.getElementById('dispFiltro').value = '';
@@ -2391,7 +2406,7 @@ async function cargarDispositivos(){
 }
 async function guardarCfgDispositivos(){
   const body = { control_activo: document.getElementById('dcfgControl').checked, auto_primer_dispositivo: document.getElementById('dcfgAuto').checked,
-                 solo_movil: document.getElementById('dcfgMovil').checked };
+                 solo_movil: document.getElementById('dcfgMovil').checked, reconocer_mismo_equipo: document.getElementById('dcfgMismo').checked };
   const r = await fetch('/api/dispositivos/config', { method:'PUT', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body) });
   toast(r.ok ? 'Reglas guardadas' : 'No se pudieron guardar', r.ok ? 'success' : 'error');
 }
@@ -2411,7 +2426,8 @@ function renderDispositivos(){
       : d.estado === 'autorizado'
         ? `<button class="btn btn-secondary btn-sm" onclick="accionDispositivo('${d.id}','revocar')">Revocar</button> <label style="font-size:11px;white-space:nowrap"><input type="checkbox" ${d.compartido?'checked':''} onchange="accionDispositivo('${d.id}','compartido',this.checked)"> Compartido</label>`
         : `<button class="btn btn-secondary btn-sm" onclick="accionDispositivo('${d.id}','autorizar')">Autorizar</button> <button class="btn btn-danger btn-sm" onclick="accionDispositivo('${d.id}','eliminar')">🗑</button>`;
-    const notas = [d.motivo, d.autorizado_por ? `autorizó ${d.autorizado_por}` : '', d.motivo_revocacion || '', d.compartido ? 'compartido (varios trabajadores)' : ''].filter(Boolean).join(' · ');
+    const notas = [d.motivo, d.autorizado_por ? `autorizó ${d.autorizado_por}` : '', d.motivo_revocacion || '', d.compartido ? 'compartido (varios trabajadores)' : '',
+                   (d.reconocimientos || []).length ? `🔁 reconocido como el mismo equipo ${d.reconocimientos.length} vez(ces), última ${new Date(d.reconocimientos[d.reconocimientos.length - 1].fecha).toLocaleDateString('es-MX')}` : ''].filter(Boolean).join(' · ');
     return `<tr><td><strong>${d.nombre}</strong><div style="font-size:11px;color:var(--ink-soft)">${d.area || ''}</div></td>
       <td>${ico(u.tipo)}<div style="font-size:11px;color:var(--ink-soft)">${u.os || ''} · ${u.navegador || ''}${u.pantalla ? ' · ' + u.pantalla : ''}</div><div style="font-size:10px;color:var(--ink-soft)">cuenta como: <b>${d.categoria === 'computadora' ? 'computadora' : 'celular'}</b></div></td>
       <td><span class="badge ${badge[d.estado] || ''}">${d.estado}</span></td>
