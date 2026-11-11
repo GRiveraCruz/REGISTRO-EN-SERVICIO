@@ -1583,6 +1583,12 @@
         <span><b>🏠 Smart Work</b><br><span style="color:var(--ink-soft);font-size:12px">La ubicación no se toma en cuenta para registrar entrada, salida o pausas, pero <b>solo puede registrar desde su laptop o computadora</b> (no desde celular o tablet). El dispositivo autorizado se sigue validando.</span></span>
       </label>
     </div>
+    <div class="form-group">
+      <label class="chk-plain" style="display:flex;gap:8px;align-items:flex-start;font-size:13px;padding:10px 12px;border:1.5px solid var(--border);border-radius:var(--r)">
+        <input type="checkbox" id="wPermitirAdmin" checked>
+        <span><b>🗂 Puede registrar horas en ADMIN</b><br><span style="color:var(--ink-soft);font-size:12px">Si se desactiva, al repartir sus horas no aparece ADMIN y todas sus horas deben ir a Jobs en WIP. El servidor también lo valida.</span></span>
+      </label>
+    </div>
     <div class="form-group" id="wLocationsBox">
       <label>Puntos de registro asignados</label>
       <div id="wLocationsCheckboxes" style="border:1.5px solid var(--border);border-radius:var(--r);padding:10px 14px;max-height:160px;overflow-y:auto;display:flex;flex-direction:column;gap:8px;">
@@ -1721,6 +1727,7 @@ async function doWorkerLoginByPin(){
       area: worker.area || '', allowedJobs: worker.allowedJobs || [], locationIds,
       shiftStart: worker.shiftStart, shiftEnd: worker.shiftEnd,
       homeOffice: !!worker.homeOffice,                     // v2.13: faltaba (el modo no se aplicaba)
+      permitirAdmin: worker.permitirAdmin !== false,       // v2.26
     };
     document.getElementById('workerPinInput').value = '';
     closeWorkerLogin();
@@ -1776,7 +1783,8 @@ async function doWorkerLogin() {
     locationIds,
     shiftStart: worker.shiftStart,
     shiftEnd: worker.shiftEnd,
-    homeOffice: !!worker.homeOffice                        // v2.13: faltaba (el modo no se aplicaba)
+    homeOffice: !!worker.homeOffice,                       // v2.13: faltaba (el modo no se aplicaba)
+    permitirAdmin: worker.permitirAdmin !== false          // v2.26
   };
 
   closeWorkerLogin();
@@ -3390,8 +3398,11 @@ function openJobHoursModal(recordId, totalHours) {
   pendingJobHoursTotal    = totalHours;
 
   // v2.15: ADMIN siempre; los Jobs se agregan desde la lista de Jobs en WIP del ERP
-  const jobs = ['ADMIN'];
+  // v2.26: ADMIN solo si el trabajador lo tiene permitido (para el admin que edita, según el trabajador del registro)
+  const permitido = puedeAdmin();
+  const jobs = permitido ? ['ADMIN'] : [];
   jhCargarWip();
+  setTimeout(() => { const m = document.getElementById('jhJobsMsg'); if (m && !permitido) m.textContent = (m.textContent || '') + ' · No tienes permitido registrar horas en ADMIN: agrega los Jobs que trabajaste.'; }, 50);
 
   document.getElementById('jobHoursTotalDisplay').textContent    = `${totalHours} h`;
   document.getElementById('jobHoursAssignedDisplay').textContent = '0 h';
@@ -3406,6 +3417,11 @@ function openJobHoursModal(recordId, totalHours) {
 
 // ═══ v2.15 — Jobs en WIP del ERP para repartir las horas ═══
 let _jobsWip = null;
+function puedeAdmin() {                       // v2.26
+  if (!currentUser) return true;
+  if (currentUser.role === 'worker') { const w = (workers || []).find(x => x.id === currentUser.id); return (w ? w.permitirAdmin : currentUser.permitirAdmin) !== false; }
+  return true;
+}
 function jhFilaHTML(job, totalHours, info) {
   const quitar = job === 'ADMIN' ? '' : `<button type="button" onclick="this.closest('.jh-fila').remove();updateJobHoursTotals()" style="border:none;background:none;color:var(--red);font-size:18px;cursor:pointer;padding:0 6px" title="Quitar">✕</button>`;
   return `<div class="jh-fila" style="display:flex;align-items:center;justify-content:space-between;gap:8px;padding:10px 4px;border-bottom:1px solid var(--border);">
@@ -3809,6 +3825,7 @@ function editWorker(id) {
   document.getElementById('wShiftStart').value = w.shiftStart || '07:00';
   document.getElementById('wShiftEnd').value = w.shiftEnd || '17:00';
   document.getElementById('wHomeOffice').checked = !!w.homeOffice;                       // v2.10
+  document.getElementById('wPermitirAdmin').checked = w.permitirAdmin !== false;          // v2.26
   document.getElementById('wLocationsBox').style.opacity = w.homeOffice ? '.45' : '1';
   const selected = w.locationIds || (w.locationId ? [w.locationId] : []);
   renderLocationCheckboxes(selected);
@@ -3879,7 +3896,8 @@ async function saveWorker() {
     shiftEnd: document.getElementById('wShiftEnd').value,
     locationIds,
     locationId: locationIds[0] || '',
-    homeOffice: document.getElementById('wHomeOffice').checked                      // v2.10
+    homeOffice: document.getElementById('wHomeOffice').checked,                     // v2.10
+    permitirAdmin: document.getElementById('wPermitirAdmin').checked                // v2.26
   };
   if (!id) return toast('Los trabajadores se dan de alta en Persico Suite (Control de Personal)', 'error');
   const url = `/api/workers/${id}`;

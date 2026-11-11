@@ -935,3 +935,30 @@ Es el tipo predeterminado al abrir "➕ Registro manual".
   salida.
 - **Segunda ejecución:** 0 cierres (no duplica).
 - **Configuración:** el cambio de hora de corte y de horas de fin de semana se guarda.
+
+---
+
+# v2.26 — Permiso por trabajador para registrar horas en ADMIN
+
+- **Casilla nueva** en la configuración de cada trabajador (Trabajadores ▸ Editar): **"🗂 Puede
+  registrar horas en ADMIN"**.
+  - Viene **activada** para todos, así que nadie cambia hasta que se desactive.
+- **Si se desactiva:**
+  - en la **distribución de horas** (salida, salidas del checador y salidas automáticas) **ya no
+    aparece ADMIN**;
+  - se avisa "No tienes permitido registrar horas en ADMIN: agrega los Jobs que trabajaste";
+  - todas las horas deben ir a Jobs en WIP.
+- **El servidor también lo valida.** Rechaza ADMIN para ese trabajador en:
+  - la salida;
+  - el registro manual (día completo o solo salida);
+  - la edición o el reparto posterior de horas (`PATCH` de jobHours).
+- **El dato** se guarda en la configuración del trabajador (`permitirAdmin`).
+
+## Probado (PostgreSQL local)
+- **ADMIN desactivado para un trabajador:**
+  - salida con ADMIN → **rechazada**;
+  - salida con el Job 652-50 → aceptada;
+  - editar sus horas poniendo ADMIN → **rechazado**.
+- **Reactivado** → la edición con ADMIN se acepta.
+- **En pantalla:** la ventana de distribución no muestra ADMIN y avisa. La casilla aparece en la
+  edición del trabajador con su valor.

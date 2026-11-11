@@ -67,6 +67,7 @@ function filaATrabajador(r) {
     locationIds: cfg.locationIds || (cfg.locationId ? [cfg.locationId] : []),
     locationId: (cfg.locationIds || [])[0] || cfg.locationId || '',
     homeOffice: !!cfg.homeOffice,                     // v2.10: no se valida la ubicación
+    permitirAdmin: cfg.permitirAdmin !== false,       // v2.26: puede registrar horas en ADMIN (por defecto sí)
     pin: r.pin_hash ? true : undefined,
   };
 }
@@ -158,6 +159,7 @@ app.put('/api/workers/:id', aw(async (req, res) => {
   const cambios = {};
   for (const k of ['shiftStart', 'shiftEnd', 'allowedJobs', 'locationIds']) if (k in b) cambios[k] = b[k];
   if ('homeOffice' in b) cambios.homeOffice = !!b.homeOffice;          // v2.10
+  if ('permitirAdmin' in b) cambios.permitirAdmin = !!b.permitirAdmin;  // v2.26
   if ('locationIds' in b) cambios.locationId = (b.locationIds || [])[0] || '';
   await guardarCfgTrabajador(w.id, cambios);
   res.json({ success: true, worker: await trabajadorPorId(w.id) });
@@ -948,7 +950,12 @@ app.get('/api/jobs-wip', aw(async (req, res) => {
   try { res.json(await jobsWip()); }
   catch (e) { res.status(500).json({ error: 'No se pudo leer la lista de Jobs de la Suite: ' + e.message }); }
 }));
-async function validarJobHours(lista, total) {
+async function validarJobHours(lista, total, workerId) {
+  // v2.26: horas en ADMIN solo si el trabajador lo tiene permitido
+  if (workerId && Array.isArray(lista) && lista.some(it => String((it && it.job) || '').trim().toUpperCase() === 'ADMIN' && (parseFloat(it.hours) || 0) > 0)) {
+    const w = await trabajadorPorId(workerId);
+    if (w && w.permitirAdmin === false) return { error: 'Este trabajador no tiene permitido registrar horas en ADMIN: reparte las horas en los Jobs que trabajó.' };
+  }
   if (!Array.isArray(lista) || !lista.length)
     return { error: 'Antes de registrar tu salida debes repartir tus horas en ADMIN o en los Jobs que trabajaste.' };
   let wip = null;
@@ -978,7 +985,7 @@ app.post('/api/records', aw(async (req, res) => {
   if (!['entrada', 'salida'].includes(tipo)) return res.status(400).json({ error: 'Tipo de registro inválido' });
   // v2.15: la SALIDA solo se asienta junto con la distribución de horas por Job (ADMIN o Jobs en WIP del ERP)
   if (tipo === 'salida') {
-    const v = await validarJobHours(b.jobHours, b.totalHours);
+    const v = await validarJobHours(b.jobHours, b.totalHours, workerId);
     if (v.error) return res.status(400).json({ error: v.error, requiere_horas: true });
     b.jobHours = v.jobHours;
   } else delete b.jobHours;
@@ -1337,7 +1344,7 @@ app.post('/api/records/manual', aw(async (req, res) => {
     if (tipo === 'salida') {
       const horas = horasSalida(ant.ts, ts);
       Object.assign(data, horas);
-      const v = await validarJobHours(b.jobHours, horas.totalHours);
+      const v = await validarJobHours(b.jobHours, horas.totalHours, workerId);
       if (v.error) return { status: 400, body: { error: v.error, requiere_horas: true, totalHours: horas.totalHours } };
       data.jobHours = v.jobHours;
     }
@@ -1396,7 +1403,7 @@ async function manualDiaCompleto(req, res, u, b, workerId, motivo) {
       return { status: 409, body: { error: `El registro siguiente (${fmt(sig)}) es una Salida sin entrada. Revisa ese día primero.` } };
     // 4) horas por Job de la salida
     const horas = horasSalida(tsE, tsS);
-    const v = await validarJobHours(b.jobHours, horas.totalHours);
+    const v = await validarJobHours(b.jobHours, horas.totalHours, workerId);
     if (v.error) return { status: 400, body: { error: v.error, requiere_horas: true, totalHours: horas.totalHours } };
     const base = { lat: null, lng: null, locationId: null, locationName: 'Registro manual', inGeofence: false, origen: 'manual',
                    manual: { por: u.username, nombre: u.name, motivo, registrado: new Date().toISOString(), dia_completo: dia },
@@ -1541,7 +1548,11 @@ app.patch('/api/records/:id', aw(async (req, res) => {
   if ('type' in b) { extra.tipo = b.type; }
   if ('timestamp' in b) { extra.ts = b.timestamp; }
   delete b.id; delete b.workerId; delete b.workerName; delete b.type; delete b.timestamp;
-  if ('jobHours' in b) b.horas_pendientes = false;            // v2.18: salida del checador ya distribuida
+  if ('jobHours' in b) {
+    b.horas_pendientes = false;                                 // v2.18: salida del checador ya distribuida
+    const reg0 = (await db.q('SELECT worker_tid FROM kiosco_registros WHERE id = $1', [req.params.id])).rows[0];   // v2.26
+    if (reg0) { const v = await validarJobHours(b.jobHours, null, reg0.worker_tid); if (v.error && /ADMIN/.test(v.error)) return res.status(400).json({ error: v.error }); }
+  }
   params.push(JSON.stringify(b));
   for (const [col, v] of Object.entries(extra)) { params.push(v); sets.push(`${col} = $${params.length}`); }
   const r = await db.q(`UPDATE kiosco_registros SET ${sets.join(', ')} WHERE id = $1 RETURNING *`, params);
