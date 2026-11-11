@@ -746,6 +746,34 @@ app.get('/api/records', aw(async (req, res) => res.json(await buscarRegistros(re
 const ESPERA_MIN = Math.max(0, parseFloat(process.env.KIOSCO_ESPERA_MIN || '5') || 0);
 app.get('/api/config/registro', (req, res) => res.json({ espera_minutos: ESPERA_MIN }));
 
+// ─── DÍA DE VIAJE (v2.24) ─────────────────────────────────────────────────────
+// · Entrada con b.viaje = true (y destino/motivo) → no se valida la ubicación; se guarda el punto.
+// · La salida (y las pausas) del mismo periodo heredan el viaje si la última marca es una
+//   Entrada de viaje. Al registrar la salida el periodo termina: la siguiente entrada vuelve a
+//   validar ubicación salvo que se marque otra vez "Día de viaje".
+async function periodoViaje(workerId, tipo, b) {
+  if (tipo === 'entrada') {
+    if (!b.viaje) return null;
+    const cfg = await db.getConfig('viaje', { habilitado: true });
+    if (cfg && cfg.habilitado === false) return { error: 'El registro de días de viaje está deshabilitado. Contacta a RRHH.' };
+    const motivo = String(b.viajeMotivo || '').trim().slice(0, 200);
+    if (motivo.length < 3) return { error: 'Indica el destino o motivo del viaje' };
+    return { motivo };
+  }
+  const ult = (await db.q('SELECT id, tipo, data FROM kiosco_registros WHERE worker_tid = $1 ORDER BY ts DESC LIMIT 1', [workerId])).rows[0];
+  if (ult && ult.tipo === 'entrada' && ult.data && ult.data.viaje && ult.data.viaje.activo)
+    return { motivo: ult.data.viaje.motivo, entrada_id: ult.id };
+  return null;
+}
+app.get('/api/viajes', aw(async (req, res) => {
+  const params = [], cond = ["(data->'viaje'->>'activo')::boolean IS TRUE"];
+  if (req.query.from) { params.push(limiteLocal(req.query.from, false)); cond.push(`ts >= $${params.length}`); }
+  if (req.query.to) { params.push(limiteLocal(req.query.to, true)); cond.push(`ts <= $${params.length}`); }
+  if (req.query.workerId) { params.push(req.query.workerId); cond.push(`worker_tid = $${params.length}`); }
+  const r = await db.q(`SELECT * FROM kiosco_registros WHERE ${cond.join(' AND ')} ORDER BY ts DESC LIMIT 2000`, params);
+  res.json(r.rows.map(registro));
+}));
+
 // ─── VALIDACIÓN DE UBICACIÓN EN EL SERVIDOR (v2.17) ─────────────────────────────
 // El servidor ya no confía en el "inGeofence" del navegador:
 //  · recalcula la distancia a las ubicaciones permitidas del trabajador;
@@ -960,17 +988,27 @@ app.post('/api/records', aw(async (req, res) => {
   if (ver.estado === 'pendiente' || ver.estado === 'rechazado')
     return res.status(403).json({ error: ver.mensaje || 'Dispositivo no autorizado', dispositivo_estado: ver.estado });
   b.dispositivo = { tipo: ver.dispositivo.tipo, os: ver.dispositivo.os, navegador: ver.dispositivo.navegador, autorizado: ver.estado === 'autorizado' };
+  // v2.24: DÍA DE VIAJE — la ubicación no es requisito para la entrada marcada como viaje ni para la
+  // salida que cierra ese periodo (la decide el servidor por el último registro, no el navegador).
+  const viaje = await periodoViaje(workerId, tipo, b);
+  if (viaje && viaje.error) return res.status(400).json({ error: viaje.error });
+  if (!viaje) delete b.viaje;
   // v2.17: la ubicación la valida el servidor (no se confía en el navegador)
-  const geo = await validarUbicacion(workerId, b, ver.dispositivo.tipo);
+  const geo = viaje ? { ok: true, viaje: true, alertas: [] } : await validarUbicacion(workerId, b, ver.dispositivo.tipo);
   if (!geo.ok) return res.status(403).json({ error: geo.error, geo_rechazo: !!geo.geo_rechazo });
-  if (!geo.homeOffice) {
+  if (viaje) {
+    const punto = (b.lat != null && b.lng != null) ? { lat: Number(b.lat), lng: Number(b.lng), accuracy: b.accuracy == null ? null : Number(b.accuracy) } : null;
+    b.inGeofence = false; b.locationId = null; b.locationName = 'Día de viaje';
+    b.viaje = { activo: true, motivo: viaje.motivo, entrada_id: viaje.entrada_id || null, punto };
+    b.geo = { validado_servidor: false, viaje: true, accuracy: punto ? punto.accuracy : null };
+  } else if (!geo.homeOffice) {
     b.inGeofence = true; b.locationId = geo.location.id; b.locationName = geo.location.name || b.locationName;
     b.geo = { distancia_m: geo.distancia_m, accuracy: geo.datos.accuracy, validado_servidor: true, alertas: geo.alertas,
               medicion: geo.medicion || null };                                // v2.21: 3 lecturas
   }
-  delete b.geoTs; delete b.clientNow; delete b.geoMuestras;
+  delete b.geoTs; delete b.clientNow; delete b.geoMuestras; delete b.viajeMotivo;
   // v2.10: trabajador en Smart Work → el registro se marca así (la ubicación no se valida)
-  { const wHO = await trabajadorPorId(workerId); b.homeOffice = !!(wHO && wHO.homeOffice); if (b.homeOffice) { b.inGeofence = false; b.locationName = 'Smart Work'; b.locationId = null; } }
+  { const wHO = await trabajadorPorId(workerId); b.homeOffice = !!(wHO && wHO.homeOffice); if (b.homeOffice && !viaje) { b.inGeofence = false; b.locationName = 'Smart Work'; b.locationId = null; } }
   if (geo.alertas && geo.alertas.length) for (const a of geo.alertas) await geoEvento(geo.w, 'alerta', a, { ...geo.datos, tipo }, id);
   const resultado = await db.tx(async (c) => {
     await c.query('SELECT pg_advisory_xact_lock(hashtext($1))', ['kiosco-registro:' + workerId]);
@@ -1028,9 +1066,12 @@ app.post('/api/pausas', aw(async (req, res) => {
   const ver = await verificarDispositivo(req, workerId, b.deviceId, b.deviceInfo);
   if (ver.estado === 'pendiente' || ver.estado === 'rechazado')
     return res.status(403).json({ error: ver.mensaje || 'Dispositivo no autorizado', dispositivo_estado: ver.estado });
-  const geo = await validarUbicacion(workerId, b, ver.dispositivo.tipo);                 // v2.17
+  const viajeP = await periodoViaje(workerId, 'pausa', b);                                // v2.24
+  if (!viajeP) delete b.viaje;
+  const geo = viajeP ? { ok: true, viaje: true, alertas: [] } : await validarUbicacion(workerId, b, ver.dispositivo.tipo);   // v2.17
   if (!geo.ok) return res.status(403).json({ error: geo.error, geo_rechazo: !!geo.geo_rechazo });
-  if (!geo.homeOffice) { b.inGeofence = true; b.locationId = geo.location.id; b.locationName = geo.location.name || b.locationName;
+  if (viajeP) { b.inGeofence = false; b.locationName = 'Día de viaje'; b.viaje = { activo: true, motivo: viajeP.motivo }; }
+  else if (!geo.homeOffice) { b.inGeofence = true; b.locationId = geo.location.id; b.locationName = geo.location.name || b.locationName;
                          b.geo = { distancia_m: geo.distancia_m, accuracy: geo.datos.accuracy, medicion: geo.medicion || null }; }
   delete b.geoMuestras; delete b.geoTs; delete b.clientNow;
   const id = uuidv4(), ts = new Date().toISOString();
@@ -1126,6 +1167,82 @@ function horasSalida(entradaIso, salidaIso) {
   return dow === 0 || dow === 6 ? { totalHours: total, baseHours: 0, extraHours: total }
                                 : { totalHours: total, baseHours: Math.min(total, lim), extraHours: Math.max(0, Math.round((total - lim) * 100) / 100) };
 }
+
+// ─── SALIDA AUTOMÁTICA POR VENCIMIENTO (v2.25) ─────────────────────────────────
+// Si una Entrada sigue sin Salida a la HORA DE CORTE del día siguiente (por defecto 03:00, hora
+// de la planta), el sistema registra la Salida con la jornada normal de ese día:
+//   lunes–jueves 10 h · viernes 8 h · sábado/domingo según configuración (por defecto 0 h).
+// Protección para turnos nocturnos: nunca antes de 16 h después de la entrada.
+// La salida queda marcada (origen 'auto'), con horas por Job pendientes y para revisión de RRHH.
+const AUTO_DEFAULT = { habilitado: true, hora_corte: '03:00', horas_fin_de_semana: 0, horas_minimas_abierta: 16 };
+async function autoCfg() { return { ...AUTO_DEFAULT, ...((await db.getConfig('autocierre', {})) || {}) }; }
+function fechaLocalDe(iso) { return new Date(iso).toLocaleDateString('en-CA', { timeZone: TZ_LOCAL }); }
+function sumarDias(ymd, n) { const d = new Date(ymd + 'T12:00:00Z'); d.setUTCDate(d.getUTCDate() + n); return d.toISOString().slice(0, 10); }
+function jornadaNormalHoras(entradaIso, cfg) {
+  const dow = new Date(new Date(entradaIso).toLocaleString('en-US', { timeZone: TZ_LOCAL })).getDay();
+  return dow >= 1 && dow <= 4 ? 10 : dow === 5 ? 8 : Number(cfg.horas_fin_de_semana || 0);
+}
+async function cerrarSalidasVencidas({ aplicar = true, ahora = Date.now() } = {}) {
+  const cfg = await autoCfg();
+  if (!cfg.habilitado && aplicar) return { cerradas: [], omitido: 'deshabilitado' };
+  // última marca de cada trabajador que sea una Entrada
+  const abiertas = (await db.q(`SELECT DISTINCT ON (worker_tid) id, worker_tid, worker_name, tipo, ts, data FROM kiosco_registros
+                                ORDER BY worker_tid, ts DESC`)).rows.filter(r => r.tipo === 'entrada');
+  const cerradas = [];
+  for (const e of abiertas) {
+    const corte = Date.parse(limiteLocal(`${sumarDias(fechaLocalDe(e.ts), 1)}T${cfg.hora_corte}:00`, false));
+    const limite = Math.max(corte, Date.parse(e.ts) + Number(cfg.horas_minimas_abierta || 16) * 3600000);
+    if (ahora < limite) continue;
+    const horasJ = jornadaNormalHoras(e.ts, cfg);
+    const salidaTs = new Date(Date.parse(e.ts) + horasJ * 3600000).toISOString();
+    const item = { worker_tid: e.worker_tid, worker_name: e.worker_name, entrada: e.ts, salida: salidaTs, horas: horasJ };
+    if (!aplicar) { cerradas.push(item); continue; }
+    const r = await db.tx(async (c) => {
+      await c.query('SELECT pg_advisory_xact_lock(hashtext($1))', ['kiosco-registro:' + e.worker_tid]);
+      const ult = (await c.query('SELECT id, tipo FROM kiosco_registros WHERE worker_tid = $1 ORDER BY ts DESC LIMIT 1', [e.worker_tid])).rows[0];
+      if (!ult || ult.id !== e.id) return null;                 // mientras tanto ya registró algo
+      const viaje = e.data && e.data.viaje && e.data.viaje.activo ? { ...e.data.viaje, entrada_id: e.id } : undefined;
+      const data = { lat: null, lng: null, locationId: null, locationName: 'Salida automática', inGeofence: false, origen: 'auto',
+                     ...horasSalida(e.ts, salidaTs), jobHours: [], horas_pendientes: horasJ > 0,
+                     auto_cierre: { regla: 'jornada normal', horas: horasJ, hora_corte: cfg.hora_corte, ejecutado: new Date(ahora).toISOString(), revisar: true },
+                     dispositivo: { tipo: 'sistema', os: '', navegador: '', autorizado: true }, ...(viaje ? { viaje } : {}) };
+      const id = uuidv4();
+      await c.query('INSERT INTO kiosco_registros (id, worker_tid, worker_name, tipo, ts, data) VALUES ($1,$2,$3,$4,$5,$6)', [id, e.worker_tid, e.worker_name, 'salida', salidaTs, JSON.stringify(data)]);
+      return id;
+    });
+    if (r) { cerradas.push({ ...item, id: r }); console.log(`[AUTO-SALIDA] ${e.worker_name}: entrada ${e.ts} → salida ${salidaTs} (${horasJ} h)`); }
+  }
+  return { cerradas };
+}
+let _autoCorriendo = false;
+async function cicloAutoCierre() {
+  if (_autoCorriendo) return; _autoCorriendo = true;
+  try {
+    const lk = (await db.q("SELECT pg_try_advisory_lock(hashtext('kiosco-autocierre')) AS ok")).rows[0];
+    if (!lk || !lk.ok) return;
+    try { await cerrarSalidasVencidas(); }
+    finally { await db.q("SELECT pg_advisory_unlock(hashtext('kiosco-autocierre'))"); }
+  } catch (e) { console.warn('[AUTO-SALIDA]', e.message); }
+  finally { _autoCorriendo = false; }
+}
+app.get('/api/autocierre/config', aw(async (req, res) => res.json(await autoCfg())));
+app.put('/api/autocierre/config', aw(async (req, res) => {
+  const b = req.body || {}, cfg = await autoCfg();
+  if ('habilitado' in b) cfg.habilitado = !!b.habilitado;
+  if ('hora_corte' in b) { if (!/^\d{2}:\d{2}$/.test(String(b.hora_corte))) return res.status(400).json({ error: 'Hora de corte inválida (HH:MM)' }); cfg.hora_corte = b.hora_corte; }
+  if ('horas_fin_de_semana' in b) { const v = parseFloat(b.horas_fin_de_semana); if (isNaN(v) || v < 0 || v > 12) return res.status(400).json({ error: 'Horas de fin de semana inválidas (0–12)' }); cfg.horas_fin_de_semana = v; }
+  await db.setConfig('autocierre', cfg);
+  res.json({ success: true, config: cfg });
+}));
+app.get('/api/autocierre', aw(async (req, res) => {          // salidas automáticas del periodo + las que se cerrarían ahora
+  const params = [], cond = ["data->>'origen' = 'auto'"];
+  if (req.query.from) { params.push(limiteLocal(req.query.from, false)); cond.push(`ts >= $${params.length}`); }
+  if (req.query.to) { params.push(limiteLocal(req.query.to, true)); cond.push(`ts <= $${params.length}`); }
+  const r = await db.q(`SELECT * FROM kiosco_registros WHERE ${cond.join(' AND ')} ORDER BY ts DESC LIMIT 1000`, params);
+  const pend = await cerrarSalidasVencidas({ aplicar: false });
+  res.json({ salidas: r.rows.map(registro), por_cerrar: pend.cerradas });
+}));
+app.post('/api/autocierre/ejecutar', aw(async (req, res) => res.json(await cerrarSalidasVencidas())));
 
 app.post('/api/contingencia/importar', aw(async (req, res) => {
   const { csv, aplicar, mapeo } = req.body || {};
@@ -1460,7 +1577,7 @@ app.get('/api/records/export', aw(async (req, res) => {
       'Ubicación': r.locationName || '',
       'Lat': r.lat || '',
       'Lng': r.lng || '',
-      'Dentro de Geocerca': r.homeOffice ? 'Smart Work' : (r.inGeofence ? 'Sí' : 'No')
+      'Dentro de Geocerca': (r.viaje && r.viaje.activo) ? `Día de viaje: ${r.viaje.motivo || ''}` : r.homeOffice ? 'Smart Work' : (r.inGeofence ? 'Sí' : 'No')
     };
   });
   if (format === 'csv') {
@@ -1574,6 +1691,7 @@ async function arrancar() {
   // Marca para la Suite: el kiosco ya trabaja sobre la base compartida
   await db.setConfig('kiosco_bd', { version: 2, arranque: new Date().toISOString() });
   app.listen(PORT, () => console.log(`Persico Attendance (PostgreSQL compartida) running on port ${PORT}`));
+  setTimeout(cicloAutoCierre, 15000); setInterval(cicloAutoCierre, 10 * 60000);          // v2.25: salidas vencidas cada 10 min
 }
 
 arrancar().catch(e => { console.error('[kiosco] No se pudo arrancar:', e.message); process.exit(1); });

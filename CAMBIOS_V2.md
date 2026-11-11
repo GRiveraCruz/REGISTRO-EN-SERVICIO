@@ -838,3 +838,100 @@ Es el tipo predeterminado al abrir "➕ Registro manual".
   - **Solo Salida el 22** → 10 h;
   - **nocturno el 23 (22:00–06:00)** → salida del 24, 8 h.
 - **Secuencia final:** Entrada → Salida alternadas del 19 al 24, sin huecos.
+
+---
+
+# v2.24 — Día de viaje
+
+## Para el trabajador
+- **Botón nuevo "✈ Día de viaje"** debajo del estado de ubicación, cuando no tiene una entrada
+  abierta.
+  - Al elegirlo se pide el **destino o motivo** (obligatorio, ej. "Visita a cliente Inteva,
+    Bluffton").
+  - Se puede quitar antes de registrar ("✕ Quitar").
+- **Con el día de viaje elegido:**
+  - la **ubicación no es requisito** para registrar la **entrada**: no se valida la geocerca, la
+    precisión, la antigüedad ni las coordenadas repetidas;
+  - **si el celular da su ubicación, se guarda el punto** (coordenadas y precisión). Si no la da,
+    se registra igual.
+- **Vale para un solo periodo de trabajo:**
+  - mientras la entrada de viaje está abierta, se muestra "✈ Periodo de viaje activo · destino —
+    termina al registrar tu salida";
+  - la **salida** de ese periodo (y las pausas) tampoco exige ubicación;
+  - **al registrar la salida, el día de viaje se desactiva.** La siguiente entrada vuelve a validar
+    ubicación, salvo que se elija otra vez.
+
+## En el servidor
+- **El servidor decide el periodo de viaje,** no el navegador: la salida y las pausas heredan el
+  viaje solo si la última marca del trabajador es una **entrada de viaje**.
+- **El registro queda con** `locationName: "Día de viaje"` y `viaje: {activo, motivo, entrada_id,
+  punto}`.
+- **Opción para RRHH:** la configuración `viaje.habilitado = false` deshabilita los días de viaje
+  para todos.
+
+## Para RRHH / administrador
+- **Reportes:** la columna Geocerca muestra **✈**, con el motivo al pasar el mouse y un enlace al
+  **punto** en el mapa. En el Excel aparece "Día de viaje: destino".
+- **🛡 Ubicación ▸ "✈ Días de viaje":** lista de entradas y salidas de viaje del periodo, con
+  trabajador, destino/motivo y punto (mapa y precisión). `GET /api/viajes`.
+
+## Probado (PostgreSQL local)
+- **Entrada a 578 km sin día de viaje** → rechazada. **Con viaje sin motivo** → pide el motivo.
+- **Con viaje y motivo** → aceptada como "Día de viaje", con el punto guardado.
+- **Pausa y salida del periodo, sin ubicación** → aceptadas como viaje.
+- **Siguiente entrada lejos, sin viaje** → rechazada otra vez.
+- **En pantalla:** "✈ Día de viaje" pidió el destino, habilitó los botones fuera de la geocerca y,
+  tras la entrada, mostró "Periodo de viaje activo".
+
+---
+
+# v2.25 — Salida automática cuando el trabajador no registra su salida
+
+## Regla
+- **Si una Entrada sigue sin Salida a la hora de corte del día siguiente** (por defecto **03:00**,
+  hora de la planta), el sistema registra la **Salida automáticamente** con la **jornada normal de
+  ese día**:
+  - **lunes a jueves:** entrada + **10 h**;
+  - **viernes:** entrada + **8 h**;
+  - **sábado y domingo:** entrada + las horas configuradas (por defecto **0 h**, porque no hay
+    jornada normal). Se cierra el periodo y queda para revisión.
+- **Protección para turnos nocturnos:** nunca se cierra antes de **16 h** después de la entrada.
+  Así quien entra a las 22:00 no se cierra a las 03:00.
+- **Revisión periódica:** cada **10 minutos**, y al iniciar el servidor. Usa un candado en la base
+  para que no corra dos veces, y vuelve a verificar por trabajador que la última marca siga siendo
+  esa entrada.
+
+## Cómo queda la salida
+- **Ubicación** "Salida automática" y `origen: 'auto'`, con `auto_cierre` (regla, horas, hora de
+  corte, cuándo se ejecutó y `revisar: true`).
+- **Horas base y extra** calculadas igual que una salida normal.
+- **Horas por Job pendientes:** al entrar al kiosco, el trabajador ve "El lunes 5 de noviembre no
+  registraste tu salida. Se registró automáticamente a las 17:00 con tu jornada normal (10 h).
+  Reparte las horas…; si la hora no es correcta, avisa a RRHH".
+  - Con 0 h (fin de semana) no se piden horas.
+- **Periodo de viaje:** si la entrada era de viaje, la salida automática conserva el viaje.
+- **Corrección:** si la hora real fue otra, RRHH puede corregirla con la edición de registros o
+  con "Registro manual".
+
+## Reportes ▸ "⏰ Salidas automáticas" (admin y RRHH)
+- **Configuración** (solo admin): **hora de corte**, **horas en sábado/domingo** y
+  **habilitado/deshabilitado**.
+- **Aviso** de las entradas ya vencidas que se cerrarán en el siguiente ciclo, y botón **"Ejecutar
+  ahora"**.
+- **Lista de salidas automáticas** de los últimos 30 días, con trabajador, entrada, salida, horas y
+  si las horas por Job siguen pendientes.
+
+## API
+- `GET/PUT /api/autocierre/config`
+- `GET /api/autocierre` (salidas automáticas y por cerrar)
+- `POST /api/autocierre/ejecutar`
+
+## Probado (PostgreSQL local)
+- **Entradas sin salida:**
+  - jueves 07:00 → salida **17:00** (10 h base, horas pendientes);
+  - viernes 07:00 → **15:00** (8 h);
+  - sábado → salida en 0 h, sin horas pendientes.
+- **No se tocaron:** una entrada nocturna de hace 10 h (protección de 16 h) ni un trabajador con
+  salida.
+- **Segunda ejecución:** 0 cierres (no duplica).
+- **Configuración:** el cambio de hora de corte y de horas de fin de semana se guarda.

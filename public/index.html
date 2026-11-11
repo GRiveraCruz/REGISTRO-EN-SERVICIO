@@ -584,6 +584,25 @@
   </div>
 </div>
 
+<!-- v2.25: salidas automáticas por vencimiento -->
+<div class="modal-overlay" id="autoModal">
+  <div class="modal" style="max-width:760px;">
+    <div class="modal-drag"></div>
+    <div class="modal-title">⏰ Salidas automáticas</div>
+    <div style="font-size:12.5px;color:var(--ink-soft);margin:-6px 0 12px">Si una Entrada sigue sin Salida a la hora de corte del día siguiente, el sistema registra la Salida con la <b>jornada normal</b> de ese día (lunes–jueves 10 h, viernes 8 h, fin de semana según configuración). Nunca antes de 16 h después de la entrada (protege turnos nocturnos). El trabajador reparte sus horas por Job al entrar al kiosco.</div>
+    <div class="grid-2" id="autoCfgBox">
+      <div class="form-group"><label>Hora de corte (día siguiente)</label><input type="time" id="autoCorte"></div>
+      <div class="form-group"><label>Horas en sábado / domingo</label><input type="number" id="autoFinde" min="0" max="12" step="0.5"></div>
+    </div>
+    <label style="display:flex;gap:8px;align-items:center;font-size:13px;margin-bottom:10px"><input type="checkbox" id="autoHab"> Salida automática habilitada</label>
+    <div style="display:flex;gap:8px;margin-bottom:12px" id="autoBtns"><button class="btn btn-secondary btn-sm" onclick="autoGuardar()">Guardar configuración</button><button class="btn btn-primary btn-sm" onclick="autoEjecutar()">Ejecutar ahora</button></div>
+    <div id="autoPorCerrar" style="font-size:12.5px;margin-bottom:10px"></div>
+    <div style="font-weight:700;font-size:13px;margin:6px 0">Salidas automáticas (últimos 30 días)</div>
+    <div class="table-wrap"><table><thead><tr><th>Trabajador</th><th>Entrada</th><th>Salida automática</th><th>Horas</th><th>Horas por Job</th></tr></thead><tbody id="autoBody"></tbody></table></div>
+    <div class="modal-actions"><button class="btn btn-secondary btn-full" onclick="closeModal('autoModal')">Cerrar</button></div>
+  </div>
+</div>
+
 <!-- v2.16: registro manual (solo administrador, con contraseña) -->
 <div class="modal-overlay" id="manualModal">
   <div class="modal" style="max-width:540px;">
@@ -744,6 +763,8 @@
           <span>📡</span> Verificando ubicación…
         </div>
       </div>
+      <!-- v2.24: Día de viaje -->
+      <div id="viajeBox" style="display:none;margin:-4px 0 14px;text-align:center"></div>
       <div id="locationSelector" style="margin-bottom:16px;display:none;">
         <div class="card">
           <div class="card-title">📍 Selecciona punto de registro</div>
@@ -1064,6 +1085,11 @@
         <div style="font-size:12px;color:var(--ink-soft);margin-bottom:8px">Fase de medición: no rechaza registros. En cada registro se toman 3 lecturas con 3 s de separación (coordenada, precisión, altitud, velocidad y rumbo). Un GPS real suele variar en la coordenada, la precisión o la altitud; una app de ubicación simulada suele repetir todo igual o no reportar altitud. Mismo periodo que arriba.</div>
         <div class="table-wrap"><table><thead><tr><th>Trabajador</th><th>Registros</th><th title="Las 3 lecturas con la misma coordenada">Coord. idénticas</th><th title="Las 3 lecturas con la misma precisión">Precisión idéntica</th><th title="Coordenada y precisión idénticas a la vez">Ambas</th><th>Sin altitud</th><th>Altitud (mediana · rango)</th><th title="Mismo valor exacto de altitud en días distintos">Altitud repetida otro día</th><th>Variación mediana</th><th>Precisión mediana</th><th>Altitud por sitio</th></tr></thead><tbody id="geoMedBody"></tbody></table></div>
       </div>
+      <div class="card">
+        <div style="font-weight:700;margin-bottom:4px">✈ Días de viaje</div>
+        <div style="font-size:12px;color:var(--ink-soft);margin-bottom:8px">Entradas y salidas registradas como "Día de viaje" (sin validar ubicación), con el destino o motivo y el punto donde se registraron. Mismo periodo que arriba.</div>
+        <div class="table-wrap"><table><thead><tr><th>Fecha</th><th>Trabajador</th><th>Tipo</th><th>Destino / motivo</th><th>Punto</th></tr></thead><tbody id="geoViajesBody"></tbody></table></div>
+      </div>
       <div class="card" id="geoCfgCard">
         <div style="font-weight:700;margin-bottom:8px">Parámetros</div>
         <div style="display:flex;gap:10px;flex-wrap:wrap;align-items:flex-end">
@@ -1135,7 +1161,8 @@
       <div style="display:flex;align-items:flex-start;gap:10px;flex-wrap:wrap">
         <div><div class="section-title">📊 Reportes de Asistencia</div>
         <div class="section-sub">Registro general y reporte semanal por trabajador</div></div>
-        <button class="btn btn-primary btn-sm" id="btnRegistroManual" onclick="manAbrir()" style="margin-left:auto;display:none">➕ Registro manual</button>
+        <button class="btn btn-secondary btn-sm" id="btnAutoCierre" onclick="autoAbrir()" style="margin-left:auto;display:none">⏰ Salidas automáticas</button>
+        <button class="btn btn-primary btn-sm" id="btnRegistroManual" onclick="manAbrir()" style="display:none">➕ Registro manual</button>
       </div>
 
       <!-- Sub-tabs -->
@@ -2432,7 +2459,7 @@ async function registrarPausa(tipo){
   disableActionBtns();
   const loc = getActiveLocation();
   const pf = esHomeOffice() ? null : await posicionFresca();                                   // v2.17
-  if (!esHomeOffice() && !pf) { toast('No se pudo obtener tu ubicación actual. Inténtalo de nuevo.', 'error'); enableActionBtns(); return; }
+  if (!esHomeOffice() && !pf && !enViaje()) { toast('No se pudo obtener tu ubicación actual. Inténtalo de nuevo.', 'error'); enableActionBtns(); return; }
   const body = { workerId: currentUser.id, workerName: currentUser.name, type: tipo, lat: currentLat, lng: currentLng, ...(pf || {}),
                  locationId: loc ? loc.id : null, locationName: loc ? loc.name : 'N/A', inGeofence: true,
                  deviceId: obtenerDeviceId(), deviceInfo: infoDispositivo() };
@@ -2651,6 +2678,13 @@ async function cargarGeo() {
       <td style="font-size:12px">${d.dispositivo || ''}</td>
       <td>${d.lat != null && !isNaN(d.lat) ? `<a target="_blank" href="https://maps.google.com/?q=${d.lat},${d.lng}">ver</a>` : '—'}</td></tr>`; }).join('')
     || '<tr><td colspan="7" style="text-align:center;color:var(--ink-soft);padding:22px">Sin eventos en el periodo</td></tr>';
+  try {                                                                                           // v2.24: días de viaje
+    const V = await (await fetch('/api/viajes?' + new URLSearchParams({ from: de.value, to: ha.value }))).json();
+    document.getElementById('geoViajesBody').innerHTML = V.map(r => `<tr><td style="white-space:nowrap">${new Date(r.timestamp).toLocaleString('es-MX')}</td><td><strong>${r.workerName}</strong></td>
+      <td>${r.type === 'entrada' ? '🟢 Entrada' : '🔴 Salida'}</td><td>${escapeHtml((r.viaje || {}).motivo || '')}</td>
+      <td>${(r.viaje || {}).punto ? `<a target="_blank" href="https://maps.google.com/?q=${r.viaje.punto.lat},${r.viaje.punto.lng}">ver mapa</a> <span style="font-size:11px;color:var(--ink-soft)">±${Math.round(r.viaje.punto.accuracy || 0)} m</span>` : '<span style="color:var(--ink-soft)">sin ubicación</span>'}</td></tr>`).join('')
+      || '<tr><td colspan="5" style="text-align:center;color:var(--ink-soft);padding:16px">Sin días de viaje en el periodo</td></tr>';
+  } catch (e) {}
   try {                                                                                           // v2.21: medición
     const M = await (await fetch('/api/geo/medicion?' + new URLSearchParams({ from: de.value, to: ha.value }))).json();
     const fm = (v, suf) => v === null || v === undefined ? '—' : `${v}${suf || ''}`;
@@ -2696,7 +2730,11 @@ async function revisarHorasPendientes() {
   const r = _pendHoras[0];
   openJobHoursModal(r.id, r.totalHours ?? 0);
   const f = new Date(r.timestamp).toLocaleDateString('es-MX', { weekday: 'long', day: '2-digit', month: 'long' });
-  document.getElementById('jhSubtitulo').innerHTML = `⏱ Tu salida del <b>${f}</b> se registró en el <b>checador de planta</b>. Reparte las horas de ese día en ADMIN o en los Jobs que trabajaste.` + (_pendHoras.length > 1 ? ` <b>(${_pendHoras.length} días pendientes)</b>` : '');
+  const hs = new Date(r.timestamp).toLocaleTimeString('es-MX', { hour: '2-digit', minute: '2-digit' });
+  document.getElementById('jhSubtitulo').innerHTML = (r.origen === 'auto'
+      ? `⏰ El <b>${f}</b> no registraste tu salida. Se registró <b>automáticamente a las ${hs}</b> con tu jornada normal (${r2h(r.totalHours)} h). Reparte las horas de ese día en ADMIN o en los Jobs que trabajaste; si la hora no es correcta, avisa a RRHH.`
+      : `⏱ Tu salida del <b>${f}</b> se registró en el <b>checador de planta</b>. Reparte las horas de ese día en ADMIN o en los Jobs que trabajaste.`)
+    + (_pendHoras.length > 1 ? ` <b>(${_pendHoras.length} días pendientes)</b>` : '');
 }
 
 // ═══ v2.18 — Panel del checador ZKTeco ═══
@@ -2722,6 +2760,39 @@ async function chkRelacionar(emp_code, worker_tid, emp_nombre) {
   const d = await r.json(); if (!r.ok) return toast(d.error || 'No se pudo guardar', 'error');
   toast(worker_tid ? `Relación guardada${d.procesadas ? ` · ${d.procesadas} checada(s) registradas` : ''}` : 'Relación quitada', 'success');
   cargarChecador();
+}
+
+// ═══ v2.25 — Salidas automáticas por vencimiento ═══
+async function autoAbrir() {
+  const c = await (await fetch('/api/autocierre/config')).json();
+  document.getElementById('autoCorte').value = c.hora_corte; document.getElementById('autoFinde').value = c.horas_fin_de_semana; document.getElementById('autoHab').checked = !!c.habilitado;
+  const admin = currentUser && currentUser.role === 'admin';
+  ['autoCorte', 'autoFinde', 'autoHab'].forEach(id => document.getElementById(id).disabled = !admin);
+  document.getElementById('autoBtns').style.display = admin ? 'flex' : 'none';
+  await autoListar();
+  document.getElementById('autoModal').classList.add('open');
+}
+async function autoListar() {
+  const de = ymd(new Date(Date.now() - 30 * 86400000)), ha = ymd(new Date());
+  const d = await (await fetch(`/api/autocierre?from=${de}&to=${ha}`)).json();
+  const f = (t) => new Date(t).toLocaleString('es-MX', { weekday: 'short', day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit' });
+  document.getElementById('autoBody').innerHTML = d.salidas.map(r => { const ent = (r.auto_cierre || {}).horas;
+    return `<tr><td><strong>${r.workerName}</strong></td><td>${r.totalHours != null ? f(new Date(Date.parse(r.timestamp) - r.totalHours * 3600000)) : '—'}</td><td>${f(r.timestamp)}</td><td>${r2h(r.totalHours)} h</td>
+      <td>${r.horas_pendientes ? '<span class="badge badge-amber">pendiente</span>' : (r.jobHours || []).map(j => `${j.job}: ${j.hours}h`).join(', ') || '—'}</td></tr>`; }).join('')
+    || '<tr><td colspan="5" style="text-align:center;color:var(--ink-soft);padding:16px">Sin salidas automáticas en los últimos 30 días</td></tr>';
+  document.getElementById('autoPorCerrar').innerHTML = d.por_cerrar.length
+    ? `⚠ <b>${d.por_cerrar.length}</b> entrada(s) ya vencidas se cerrarán en el siguiente ciclo (cada 10 min): ${d.por_cerrar.map(x => `${x.worker_name} (${x.horas} h)`).join(', ')}`
+    : '<span style="color:#15803d">✓ No hay entradas vencidas sin salida</span>';
+}
+async function autoGuardar() {
+  const r = await fetch('/api/autocierre/config', { method: 'PUT', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ hora_corte: document.getElementById('autoCorte').value, horas_fin_de_semana: document.getElementById('autoFinde').value, habilitado: document.getElementById('autoHab').checked }) });
+  const d = await r.json(); if (!r.ok) return toast(d.error || 'No se pudo guardar', 'error');
+  toast('Configuración guardada', 'success'); autoListar();
+}
+async function autoEjecutar() {
+  const d = await (await fetch('/api/autocierre/ejecutar', { method: 'POST' })).json();
+  toast(`${(d.cerradas || []).length} salida(s) automática(s) registrada(s)`, 'success'); autoListar();
 }
 
 function mostrarLoginAdmin(si){
@@ -2859,7 +2930,8 @@ function showPanel(id) {
   if (id === 'pausas') cargarPausasAdmin();
   if (id === 'geo') cargarGeo();
   if (id === 'checador') cargarChecador();
-  if (id === 'reportes') { const bm = document.getElementById('btnRegistroManual'); if (bm) bm.style.display = currentUser && currentUser.role === 'admin' ? '' : 'none'; }
+  if (id === 'reportes') { const bm = document.getElementById('btnRegistroManual'); if (bm) bm.style.display = currentUser && currentUser.role === 'admin' ? '' : 'none';
+    const ba = document.getElementById('btnAutoCierre'); if (ba) ba.style.display = currentUser && ['admin', 'rrhh'].includes(currentUser.role) ? '' : 'none'; }
   if (id === 'contingencia') { document.getElementById('ctgVista').innerHTML = ''; document.getElementById('ctgBtn').style.display = 'none'; }
 }
 
@@ -2906,6 +2978,7 @@ function checkGeo() {
   }, err => {
     status.className = 'geo-status geo-fail';
     status.innerHTML = '<span>❌</span> No se pudo obtener ubicación. Verifique permisos.';
+    if (enViaje()) { checkGeofence(); return; }                          // v2.24: en viaje no se exige
     disableActionBtns();
   }, { enableHighAccuracy: true, timeout: 15000 });
 }
@@ -2989,8 +3062,47 @@ function esHomeOffice() {
   const w = (typeof workers !== 'undefined' && workers || []).find(x => x.id === currentUser.id);
   return !!(w && w.homeOffice);
 }
+// ═══ v2.24 — Día de viaje ═══
+let _viajeSel = null;                      // { motivo } elegido antes de registrar la entrada
+function viajeAbierto() {                  // periodo de viaje en curso (la última marca es una entrada de viaje)
+  if (!currentUser || currentUser.role !== 'worker') return null;
+  const u = getLastRecord();
+  return (u && u.type === 'entrada' && u.viaje && u.viaje.activo) ? u.viaje : null;
+}
+function enViaje() { return !!(viajeAbierto() || _viajeSel); }
+function renderViaje() {
+  const box = document.getElementById('viajeBox'); if (!box) return;
+  if (!currentUser || currentUser.role !== 'worker') { box.style.display = 'none'; return; }
+  box.style.display = '';
+  const ab = viajeAbierto();
+  if (ab) { box.innerHTML = `<div style="display:inline-block;padding:8px 14px;border-radius:999px;background:#eef2ff;color:#3730a3;font-size:13px;font-weight:600">✈ Periodo de viaje activo · ${ab.motivo ? escapeHtml(ab.motivo) : ''} — termina al registrar tu salida</div>`; return; }
+  if (_viajeSel) {
+    box.innerHTML = `<div style="display:inline-flex;gap:8px;align-items:center;padding:8px 14px;border-radius:999px;background:#eef2ff;color:#3730a3;font-size:13px;font-weight:600">✈ Día de viaje: ${escapeHtml(_viajeSel.motivo)} <button onclick="viajeQuitar()" style="border:none;background:none;color:#c8102e;font-weight:700;cursor:pointer">✕ Quitar</button></div>
+      <div style="font-size:11.5px;color:var(--ink-soft);margin-top:4px">Tu ubicación no se valida en esta entrada ni en su salida (sí se guarda el punto donde registras).</div>`;
+    return;
+  }
+  box.innerHTML = `<button class="btn btn-secondary btn-sm" onclick="viajeActivar()" style="border-style:dashed">✈ Día de viaje</button>`;
+}
+function viajeActivar() {
+  const u = getLastRecord();
+  if (u && u.type === 'entrada') return toast('Ya tienes una entrada abierta. El día de viaje se elige antes de registrar la entrada.', 'error');
+  const m = prompt('Día de viaje — escribe el destino o motivo (ej. "Visita a cliente Inteva, Bluffton"):', '');
+  if (m === null) return;
+  if (m.trim().length < 3) return toast('Escribe el destino o motivo del viaje', 'error');
+  _viajeSel = { motivo: m.trim() };
+  renderViaje(); checkGeofence();
+}
+function viajeQuitar() { _viajeSel = null; renderViaje(); checkGeofence(); }
+function escapeHtml(t) { return String(t || '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]); }
+
 function checkGeofence() {
   const status = document.getElementById('geoStatus');
+  renderViaje();
+  if (!esHomeOffice() && enViaje()) {                                   // v2.24
+    status.className = 'geo-status geo-ok';
+    status.innerHTML = '<span>✈</span> Día de viaje: la ubicación no es requisito' + (currentLat !== null ? ' · se registrará el punto donde estés' : '');
+    enableActionBtns(); return;
+  }
   // v2.10: Smart Work → la ubicación no se valida
   if (esHomeOffice()) {
     status.className = 'geo-status geo-ok';
@@ -3177,15 +3289,18 @@ async function enviarRegistro(record) {
   // v2.17: ubicación tomada en el momento (con su precisión y hora) — el servidor la valida
   if (!esHomeOffice()) {
     const p = await posicionFresca();
-    if (!p) { toast('No se pudo obtener tu ubicación actual. Activa la ubicación del dispositivo e inténtalo de nuevo.', 'error'); checkGeofence(); return false; }
-    Object.assign(record, p);
+    if (!p && !enViaje()) { toast('No se pudo obtener tu ubicación actual. Activa la ubicación del dispositivo e inténtalo de nuevo.', 'error'); checkGeofence(); return false; }
+    if (p) Object.assign(record, p);
   }
+  if (type === 'entrada' && _viajeSel) { record.viaje = true; record.viajeMotivo = _viajeSel.motivo; }     // v2.24
   try {
     const r = await fetch('/api/records', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(record) });
     const data = await r.json();
     if (r.ok) {
-      toast(`${type === 'entrada' ? '🟢 Entrada' : '🔴 Salida'} registrada correctamente`, 'success');
+      toast(`${type === 'entrada' ? '🟢 Entrada' : '🔴 Salida'} registrada correctamente${data.record && data.record.viaje ? ' (día de viaje)' : ''}`, 'success');
       records.push(data.record);
+      _viajeSel = null;                                                    // v2.24: el viaje vale para un solo periodo
+      setTimeout(() => { renderViaje(); checkGeofence(); }, 0);
       _registroSesion = type;                           // v2.3: bloquea el otro movimiento en esta sesión
       loadMyRecords();
       setTimeout(cargarCardex, 600);                    // v2.4: horas de la semana
@@ -4019,7 +4134,7 @@ function renderRecordsTable(recs) {
         <td>${r.baseHours != null ? r.baseHours+' h' : '—'}</td>
         <td>${r.extraHours != null ? r2h(r.extraHours)+' h' : '—'}</td>
         <td>${r.locationName || '—'}</td>
-        <td>${r.homeOffice ? '<span class="badge badge-amber" title="Smart Work: no se valida la ubicación">🏠</span>' : `<span class="badge ${r.inGeofence?'badge-green':'badge-red'}">${r.inGeofence?'✓':'✗'}</span>`}</td>
+        <td>${r.viaje && r.viaje.activo ? `<span class="badge badge-amber" title="Día de viaje: ${String(r.viaje.motivo||'').replace(/"/g,'')}">✈</span>${r.viaje.punto ? ` <a target="_blank" style="font-size:11px" href="https://maps.google.com/?q=${r.viaje.punto.lat},${r.viaje.punto.lng}">punto</a>` : ''}` : r.homeOffice ? '<span class="badge badge-amber" title="Smart Work: no se valida la ubicación">🏠</span>' : `<span class="badge ${r.inGeofence?'badge-green':'badge-red'}">${r.inGeofence?'✓':'✗'}</span>`}</td>
         <td title="${r.dispositivo ? `${r.dispositivo.os} · ${r.dispositivo.navegador}${r.dispositivo.autorizado===false?' · sin control de dispositivo':''}` : 'Registro anterior al control de dispositivos'}">${r.dispositivo ? ({movil:'📱 Celular', tablet:'📟 Tablet', computadora:'💻 Computadora'}[r.dispositivo.tipo] || r.dispositivo.tipo) : '—'}</td>
         ${isAdmin ? `<td style="display:flex;gap:4px;"><button class="btn btn-secondary btn-sm" onclick="editRecord('${r.id}')">✏️</button><button class="btn btn-danger btn-sm" onclick="deleteRecord('${r.id}')">🗑</button></td>` : ''}
       </tr>`;
