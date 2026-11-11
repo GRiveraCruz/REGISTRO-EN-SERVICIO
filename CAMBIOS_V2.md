@@ -962,3 +962,41 @@ Es el tipo predeterminado al abrir "➕ Registro manual".
 - **Reactivado** → la edición con ADMIN se acepta.
 - **En pantalla:** la ventana de distribución no muestra ADMIN y avisa. La casilla aparece en la
   edición del trabajador con su valor.
+
+---
+
+# v2.27 — Comparación contra todos los puntos registrados y administración delegada a RRHH
+
+## Comparación contra los puntos registrados
+- **Si el trabajador está fuera de sus puntos asignados,** el servidor revisa si está **dentro de
+  otro punto de registro existente** (con la misma tolerancia de hasta 30 m por imprecisión).
+  - **Si lo está:** el registro **se acepta** en ese punto, marcado como **punto no asignado**
+    (`punto_no_asignado: {id, name}`), y se genera una **alerta** para RRHH.
+  - **Si no está dentro de ningún punto registrado:** se rechaza, como antes.
+- **No se aceptan ubicaciones fuera de los puntos registrados** (no hay solicitudes de puntos
+  nuevos), y siguen aplicando todas las validaciones contra GPS falso.
+- **En el kiosco,** el trabajador ve: "Estás en **PERSICO USA**, un punto registrado que no tienes
+  asignado. Puedes registrar; se avisará a RRHH".
+  - Si tiene varios puntos asignados y no eligió uno, se usa automáticamente el punto donde está.
+- **Aplica a** entradas, salidas y pausas.
+
+## 🛡 Ubicación ▸ "📍 Registros en puntos no asignados"
+- **Lista** de los registros aceptados en puntos no asignados: fecha, trabajador, punto y tipo.
+- **Botón "Asignar punto"**: agrega ese punto a los puntos del trabajador, conservando los que ya
+  tenía (`POST /api/locations/:id/asignar`).
+
+## Administración delegada
+- **RRHH ve la pestaña 📍 Ubicaciones** y puede crear y editar puntos de registro y asignarlos a
+  trabajadores. Así no depende solo del administrador cuando está de vacaciones o ausente.
+- **Bitácora en cada punto** (`historial`): quién lo creó o modificó, cuándo y qué campos cambió.
+
+## Probado (PostgreSQL local)
+- **Trabajador con el punto "Planta" asignado:**
+  - registro lejos de todo → **rechazado**;
+  - registro dentro de "PERSICO USA" (no asignado) → **aceptado** en PERSICO USA, con
+    `punto_no_asignado` y la alerta "Registro en punto no asignado: PERSICO USA (28 m)".
+- **"Asignar punto"** → el trabajador queda con Planta y PERSICO USA. La siguiente salida ya no se
+  marca como no asignada.
+- **Bitácora:** el alta y la edición del radio por "rrhh" quedan registradas.
+- **En pantalla:** el mensaje del punto no asignado aparece y el botón de entrada queda
+  habilitado.

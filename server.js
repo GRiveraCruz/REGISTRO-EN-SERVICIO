@@ -672,16 +672,30 @@ app.get('/api/locations', aw(async (req, res) => {
 }));
 app.post('/api/locations', aw(async (req, res) => {
   const id = uuidv4();
-  const data = { radius: 150, ...req.body, createdAt: new Date().toISOString() };
-  delete data.id;
+  const actor = String((req.body || {}).actor || '').slice(0, 60);                // v2.27: bitácora (admin o RRHH)
+  const data = { radius: 150, ...req.body, createdAt: new Date().toISOString(), historial: [{ fecha: new Date().toISOString(), por: actor, accion: 'creado' }] };
+  delete data.id; delete data.actor;
   await db.q('INSERT INTO kiosco_ubicaciones (id, data) VALUES ($1, $2)', [id, JSON.stringify(data)]);
   res.json({ success: true, location: { ...data, id } });
 }));
 app.put('/api/locations/:id', aw(async (req, res) => {
   const b = { ...req.body }; delete b.id;
+  const actor = String(b.actor || '').slice(0, 60); delete b.actor;                 // v2.27
+  const prev = (await db.q('SELECT data FROM kiosco_ubicaciones WHERE id = $1', [req.params.id])).rows[0];
+  if (prev) b.historial = [...((prev.data || {}).historial || []), { fecha: new Date().toISOString(), por: actor, accion: 'modificado',
+    cambios: Object.keys(b).filter(k => k !== 'historial') }].slice(-50);
   const r = await db.q('UPDATE kiosco_ubicaciones SET data = data || $2 WHERE id = $1 RETURNING *', [req.params.id, JSON.stringify(b)]);
   if (!r.rowCount) return res.status(404).json({ error: 'Ubicación no encontrada' });
   res.json({ success: true, location: ubicacion(r.rows[0]) });
+}));
+app.post('/api/locations/:id/asignar', aw(async (req, res) => {        // v2.27: asignar un punto a un trabajador (desde la alerta)
+  const w = await trabajadorPorId(String((req.body || {}).workerId || ''));
+  if (!w) return res.status(404).json({ error: 'Trabajador no encontrado' });
+  const loc = (await db.q('SELECT id FROM kiosco_ubicaciones WHERE id = $1', [req.params.id])).rows[0];
+  if (!loc) return res.status(404).json({ error: 'Punto no encontrado' });
+  const ids = [...new Set([...(w.locationIds || []), req.params.id])];
+  await guardarCfgTrabajador(w.id, { locationIds: ids, locationId: ids[0] });
+  res.json({ success: true, locationIds: ids });
 }));
 app.delete('/api/locations/:id', aw(async (req, res) => {
   await db.q('DELETE FROM kiosco_ubicaciones WHERE id = $1', [req.params.id]);
@@ -855,8 +869,19 @@ async function validarUbicacion(workerId, b, tipoDisp) {
   }
   const radio = parseFloat(mejor.l.radius || 150);
   const tolerancia = Math.min(acc == null || isNaN(acc) ? 0 : acc, 30);          // se toleran hasta 30 m de imprecisión
-  if (mejor.d > radio + tolerancia)
-    return rechazo(`Estás fuera del punto de registro "${mejor.l.name || ''}" (${Math.round(mejor.d)} m del centro; radio ${Math.round(radio)} m).`);
+  let noAsignado = null;
+  if (mejor.d > radio + tolerancia) {
+    // v2.27: comparar contra TODOS los puntos registrados — si está dentro de otro punto existente
+    // (no asignado a él), se acepta marcado y se avisa a RRHH para asignarlo
+    let otro = null;
+    for (const l of locs) {
+      if (permitidas.some(p => p.id === l.id)) continue;
+      const d = distanciaM(lat, lng, parseFloat(l.lat), parseFloat(l.lng));
+      if (d <= parseFloat(l.radius || 150) + tolerancia && (!otro || d < otro.d)) otro = { l, d };
+    }
+    if (!otro) return rechazo(`Estás fuera del punto de registro "${mejor.l.name || ''}" (${Math.round(mejor.d)} m del centro; radio ${Math.round(radio)} m).`);
+    mejor = otro; noAsignado = { id: otro.l.id, name: otro.l.name || '' };
+  }
   const alertas = [];
   const ant = (await db.q(`SELECT ts, data FROM kiosco_registros WHERE worker_tid = $1 AND (data->>'lat') IS NOT NULL ORDER BY ts DESC LIMIT 1`, [workerId])).rows[0];
   if (ant && ant.data && ant.data.lat != null) {
@@ -876,7 +901,8 @@ async function validarUbicacion(workerId, b, tipoDisp) {
     if (cfg.rechazar_coordenadas_identicas) return rechazo(msg, true);
     alertas.push(msg);
   }
-  return { ok: true, inGeofence: true, location: mejor.l, distancia_m: Math.round(mejor.d), alertas, w, datos, medicion };
+  if (noAsignado) alertas.push(`Registro en punto no asignado: "${noAsignado.name}" (${Math.round(mejor.d)} m del centro)`);
+  return { ok: true, inGeofence: true, location: mejor.l, distancia_m: Math.round(mejor.d), alertas, w, datos, medicion, noAsignado };
 }
 
 // eventos de ubicación (rechazos y alertas) y configuración
@@ -1012,11 +1038,13 @@ app.post('/api/records', aw(async (req, res) => {
     b.inGeofence = true; b.locationId = geo.location.id; b.locationName = geo.location.name || b.locationName;
     b.geo = { distancia_m: geo.distancia_m, accuracy: geo.datos.accuracy, validado_servidor: true, alertas: geo.alertas,
               medicion: geo.medicion || null };                                // v2.21: 3 lecturas
+    if (geo.noAsignado) b.punto_no_asignado = geo.noAsignado;                 // v2.27
   }
   delete b.geoTs; delete b.clientNow; delete b.geoMuestras; delete b.viajeMotivo;
   // v2.10: trabajador en Smart Work → el registro se marca así (la ubicación no se valida)
   { const wHO = await trabajadorPorId(workerId); b.homeOffice = !!(wHO && wHO.homeOffice); if (b.homeOffice && !viaje) { b.inGeofence = false; b.locationName = 'Smart Work'; b.locationId = null; } }
-  if (geo.alertas && geo.alertas.length) for (const a of geo.alertas) await geoEvento(geo.w, 'alerta', a, { ...geo.datos, tipo }, id);
+  if (geo.alertas && geo.alertas.length) for (const a of geo.alertas)
+    await geoEvento(geo.w, 'alerta', a, { ...geo.datos, tipo, ...(geo.noAsignado && /no asignado/.test(a) ? { no_asignado: geo.noAsignado } : {}) }, id);
   const resultado = await db.tx(async (c) => {
     await c.query('SELECT pg_advisory_xact_lock(hashtext($1))', ['kiosco-registro:' + workerId]);
     const ult = (await c.query('SELECT tipo, ts FROM kiosco_registros WHERE worker_tid = $1 ORDER BY ts DESC LIMIT 1', [workerId])).rows[0];

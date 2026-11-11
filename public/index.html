@@ -1086,6 +1086,11 @@
         <div class="table-wrap"><table><thead><tr><th>Trabajador</th><th>Registros</th><th title="Las 3 lecturas con la misma coordenada">Coord. idénticas</th><th title="Las 3 lecturas con la misma precisión">Precisión idéntica</th><th title="Coordenada y precisión idénticas a la vez">Ambas</th><th>Sin altitud</th><th>Altitud (mediana · rango)</th><th title="Mismo valor exacto de altitud en días distintos">Altitud repetida otro día</th><th>Variación mediana</th><th>Precisión mediana</th><th>Altitud por sitio</th></tr></thead><tbody id="geoMedBody"></tbody></table></div>
       </div>
       <div class="card">
+        <div style="font-weight:700;margin-bottom:4px">📍 Registros en puntos no asignados</div>
+        <div style="font-size:12px;color:var(--ink-soft);margin-bottom:8px">El trabajador estaba dentro de un punto de registro existente que no tiene asignado: el registro se aceptó. Si es correcto, asígnale el punto con un clic. Mismo periodo que arriba.</div>
+        <div class="table-wrap"><table><thead><tr><th>Fecha</th><th>Trabajador</th><th>Punto</th><th>Tipo</th><th></th></tr></thead><tbody id="geoNoAsigBody"></tbody></table></div>
+      </div>
+      <div class="card">
         <div style="font-weight:700;margin-bottom:4px">✈ Días de viaje</div>
         <div style="font-size:12px;color:var(--ink-soft);margin-bottom:8px">Entradas y salidas registradas como "Día de viaje" (sin validar ubicación), con el destino o motivo y el punto donde se registraron. Mismo periodo que arriba.</div>
         <div class="table-wrap"><table><thead><tr><th>Fecha</th><th>Trabajador</th><th>Tipo</th><th>Destino / motivo</th><th>Punto</th></tr></thead><tbody id="geoViajesBody"></tbody></table></div>
@@ -2686,6 +2691,14 @@ async function cargarGeo() {
       <td style="font-size:12px">${d.dispositivo || ''}</td>
       <td>${d.lat != null && !isNaN(d.lat) ? `<a target="_blank" href="https://maps.google.com/?q=${d.lat},${d.lng}">ver</a>` : '—'}</td></tr>`; }).join('')
     || '<tr><td colspan="7" style="text-align:center;color:var(--ink-soft);padding:22px">Sin eventos en el periodo</td></tr>';
+  {                                                                                               // v2.27: puntos no asignados
+    const NA = L.filter(e => e.data && e.data.no_asignado);
+    if (!workers || !workers.length) { try { await loadWorkers(); } catch (er) {} }
+    document.getElementById('geoNoAsigBody').innerHTML = NA.map(e => { const w = (workers || []).find(x => x.id === e.worker_tid), ya = w && (w.locationIds || []).includes(e.data.no_asignado.id);
+      return `<tr><td style="white-space:nowrap">${new Date(e.ts).toLocaleString('es-MX')}</td><td><strong>${e.worker_name || e.worker_tid}</strong></td><td>${escapeHtml(e.data.no_asignado.name)}</td><td>${escapeHtml(e.data.tipo || '')}</td>
+        <td>${ya ? '<span class="badge badge-green">ya asignado</span>' : `<button class="btn btn-secondary btn-sm" onclick="asignarPuntoNoAsignado('${e.data.no_asignado.id}','${e.worker_tid}','${escapeHtml(e.data.no_asignado.name).replace(/'/g, '')}')">Asignar punto</button>`}</td></tr>`; }).join('')
+      || '<tr><td colspan="5" style="text-align:center;color:var(--ink-soft);padding:16px">Sin registros en puntos no asignados</td></tr>';
+  }
   try {                                                                                           // v2.24: días de viaje
     const V = await (await fetch('/api/viajes?' + new URLSearchParams({ from: de.value, to: ha.value }))).json();
     document.getElementById('geoViajesBody').innerHTML = V.map(r => `<tr><td style="white-space:nowrap">${new Date(r.timestamp).toLocaleString('es-MX')}</td><td><strong>${r.workerName}</strong></td>
@@ -2803,6 +2816,13 @@ async function autoEjecutar() {
   toast(`${(d.cerradas || []).length} salida(s) automática(s) registrada(s)`, 'success'); autoListar();
 }
 
+async function asignarPuntoNoAsignado(locId, workerId, nombre) {          // v2.27
+  if (!confirm(`¿Asignar el punto "${nombre}" a este trabajador? Sus puntos actuales se conservan.`)) return;
+  const r = await fetch(`/api/locations/${locId}/asignar`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ workerId }) });
+  const d = await r.json(); if (!r.ok) return toast(d.error || 'No se pudo asignar', 'error');
+  toast('Punto asignado', 'success'); await loadWorkers(); cargarGeo();
+}
+
 function mostrarLoginAdmin(si){
   document.getElementById('loginWorkerBox').style.display = si ? 'none' : '';
   document.getElementById('loginAdminBox').style.display = si ? '' : 'none';
@@ -2894,6 +2914,7 @@ function buildNav() {
     navItems.push({ id:'reportes', icon:'📊', label:'Reportes' });
     if (currentUser.role === 'rrhh') {
       navItems.push({ id:'trabajadores', icon:'👷', label:'Trabajadores' });
+      navItems.push({ id:'ubicaciones', icon:'📍', label:'Ubicaciones' });          // v2.27: RRHH también administra puntos
     }
     navItems.push({ id:'dispositivos', icon:'📱', label:'Dispositivos' });   // v2.6
     if (['admin','rrhh'].includes(currentUser.role)) navItems.push({ id:'pausas', icon:'☕', label:'Pausas' });   // v2.9: solo admin y RRHH
@@ -3120,6 +3141,19 @@ function checkGeofence() {
   const loc = getActiveLocation();
 
   if (!loc) {
+    // v2.27: si está dentro de cualquier punto registrado, se usa ese
+    if (currentLat !== null) {
+      const ids = currentUser.locationIds || [];
+      const cerca = locations.map(l => ({ l, d: haversine(currentLat, currentLng, parseFloat(l.lat), parseFloat(l.lng)) }))
+        .filter(x => x.d <= parseFloat(x.l.radius || 150)).sort((a, b) => (ids.includes(b.l.id) - ids.includes(a.l.id)) || a.d - b.d)[0];
+      if (cerca) {
+        const asig = !ids.length || ids.includes(cerca.l.id);
+        status.className = 'geo-status geo-ok';
+        status.innerHTML = asig ? `<span>✅</span> Dentro de ${cerca.l.name} (${Math.round(cerca.d)} m del centro)`
+                                : `<span>📍</span> Estás en <b>${cerca.l.name}</b>, un punto registrado que no tienes asignado. Puedes registrar; se avisará a RRHH.`;
+        enableActionBtns(); return;
+      }
+    }
     status.className = 'geo-status geo-checking';
     status.innerHTML = '<span>📍</span> Sin punto de registro asignado. Contacte a su supervisor.';
     disableActionBtns(); return;
@@ -3132,6 +3166,14 @@ function checkGeofence() {
     status.innerHTML = `<span>✅</span> Dentro de ${loc.name} (${Math.round(dist)} m del centro)`;
     enableActionBtns();
   } else {
+    // v2.27: ¿está dentro de otro punto registrado (no asignado)? → se permite y se avisa a RRHH
+    const otro = locations.filter(l => l.id !== loc.id).map(l => ({ l, d: haversine(currentLat, currentLng, parseFloat(l.lat), parseFloat(l.lng)) }))
+      .filter(x => x.d <= parseFloat(x.l.radius || 150)).sort((a, b) => a.d - b.d)[0];
+    if (otro) {
+      status.className = 'geo-status geo-ok';
+      status.innerHTML = `<span>📍</span> Estás en <b>${otro.l.name}</b> (${Math.round(otro.d)} m del centro), un punto registrado que no tienes asignado. Puedes registrar; se avisará a RRHH.`;
+      enableActionBtns(); return;
+    }
     status.className = 'geo-status geo-fail';
     status.innerHTML = `<span>🚫</span> Fuera de la región autorizada para el registro (${Math.round(dist)} m de distancia)`;
     disableActionBtns();
@@ -4085,7 +4127,7 @@ async function saveLocation() {
   if (!data.name || !data.lat || !data.lng) return toast('Complete nombre y coordenadas', 'error');
   const url = id ? `/api/locations/${id}` : '/api/locations';
   const method = id ? 'PUT' : 'POST';
-  const r = await fetch(url, { method, headers:{'Content-Type':'application/json'}, body: JSON.stringify(data) });
+  const r = await fetch(url, { method, headers:{'Content-Type':'application/json'}, body: JSON.stringify({ ...data, actor: currentUser && (currentUser.username || currentUser.name) }) });   // v2.27: bitácora
   if (r.ok) {
     toast('Ubicación guardada ✓', 'success');
     await loadLocations(); renderLocationsTable(); closeModal('mapModal');
