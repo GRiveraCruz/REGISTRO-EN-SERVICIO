@@ -114,6 +114,18 @@ CREATE TABLE IF NOT EXISTS kiosco_checador_map (
   emp_nombre VARCHAR,
   updated_at TIMESTAMP DEFAULT now()
 );
+-- v2.31: registros condicionados (extemporáneos) pendientes de autorización
+CREATE TABLE IF NOT EXISTS kiosco_registros_pendientes (
+  id          VARCHAR PRIMARY KEY,
+  worker_tid  VARCHAR NOT NULL,
+  worker_name VARCHAR,
+  tipo        VARCHAR NOT NULL,            -- entrada | salida
+  ts          VARCHAR NOT NULL,            -- fecha y hora solicitadas (ISO UTC)
+  estado      VARCHAR NOT NULL DEFAULT 'pendiente',   -- pendiente | autorizado | rechazado | cancelado
+  creado      TIMESTAMP DEFAULT now(),
+  data        JSONB NOT NULL DEFAULT '{}'::jsonb
+);
+CREATE INDEX IF NOT EXISTS ix_kiosco_reg_pend_estado ON kiosco_registros_pendientes (estado);
 CREATE TABLE IF NOT EXISTS kiosco_dispositivos (
   id            VARCHAR PRIMARY KEY,
   worker_tid    VARCHAR NOT NULL,

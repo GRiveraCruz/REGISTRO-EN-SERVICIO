@@ -1124,3 +1124,61 @@ Es el tipo predeterminado al abrir "➕ Registro manual".
   (8.74 h).
 - **Puente sin enviar desde antes del corte** → la salida automática se pospone. Con el puente al
   día → se cierra.
+
+---
+
+# v2.31 — Registro condicionado y centros de costo
+
+## Registro condicionado (olvidé checar)
+- **Trabajador:** botón **"🕒 ¿Olvidaste checar? Registro condicionado"** debajo de los botones de
+  registro. Se elige qué olvidó, la **hora real** y el **motivo** (obligatorio).
+- **Opciones permitidas:**
+  - **Entrada:** solo del **día en curso**;
+  - **Salida:** del **día en curso** o del **día anterior**.
+- **Queda como "pendiente":** **no cuenta** en el registro oficial. El trabajador ve "Registro
+  condicionado pendiente de autorizar…" y puede **cancelarlo**. Solo puede tener uno pendiente a la
+  vez.
+- **Validaciones al enviarlo:**
+  - fecha permitida y no futura;
+  - dispositivo autorizado;
+  - secuencia: una entrada no puede quedar sobre otra entrada abierta; una salida necesita una
+    entrada abierta de hasta 20 h antes;
+  - no puede haber registros posteriores, salvo una **salida automática** del mismo periodo, que
+    se reemplazará al autorizar.
+- **No exige ubicación:** si el celular la da, se guarda el punto.
+- **Aviso por WhatsApp** a los contactos de 🔔 Notificaciones: trabajador, tipo, fecha y hora, y
+  motivo.
+- **Administrador / RRHH:** Reportes ▸ **"🕒 Registros condicionados (N)"**:
+  - lista de pendientes (o todos, autorizados y rechazados);
+  - **Autorizar** o **Rechazar** con **su contraseña**. Rechazar pide motivo, que el trabajador ve
+    en su pantalla.
+  - **Al autorizar, se vuelve a validar la secuencia** y el registro pasa al **registro oficial**
+    como "Registro condicionado" (`origen: 'condicionado'`, con motivo, quién autorizó y cuándo).
+  - Una salida autorizada **reemplaza a la salida automática** del periodo si existía. Sus horas
+    por Job quedan pendientes para el trabajador.
+- **API:**
+  - `POST/GET /api/registros-condicionados`
+  - `POST /api/registros-condicionados/:id/resolver` (`accion` autorizar|rechazar, `adminUser`,
+    `password`)
+  - `POST /api/registros-condicionados/:id/cancelar`
+
+## Centros de costo (de la Suite, rev147)
+- **Al repartir horas** aparecen también los **centros de costo activos** de la Suite (tabla
+  `centros_costo`), junto con los Jobs en WIP.
+- **El servidor los acepta** al validar las horas por Job.
+
+## Probado (PostgreSQL local)
+- **Lista de destinos:** 652-50 y CC-ADM-01 (el centro de costo inactivo no aparece).
+- **Rechazados al enviar:**
+  - entrada de ayer → "solo del día de hoy";
+  - hora futura → rechazada;
+  - salida sin entrada → "no hay una entrada abierta".
+- **Entrada de hoy** → pendiente; una segunda → rechazada; el registro oficial sigue en 0.
+- **Autorizar:**
+  - con contraseña mala → rechazado;
+  - con la correcta → entrada oficial "Registro condicionado".
+- **Rechazar** sin motivo → lo pide; con motivo → rechazado.
+- **Salida de ayer cuando ya había salida automática** → aceptada como pendiente. Al autorizar,
+  **reemplazó la automática** (salida 22:00Z, 9 h, origen condicionado).
+- **En pantalla:** el botón del trabajador, el aviso de pendiente y el contador "(1)" en la ventana
+  del administrador.

@@ -1005,7 +1005,14 @@ app.put('/api/geo/config', aw(async (req, res) => {
 async function jobsWip() {
   const r = await db.q(`SELECT job_number, customer, data->>'description' AS descripcion, data->>'pm' AS pm
                         FROM jobs WHERE upper(trim(COALESCE(status, data->>'status', ''))) = 'WIP' ORDER BY job_number`);
-  return r.rows.map(x => ({ job: String(x.job_number || '').trim().toUpperCase(), cliente: x.customer || '', descripcion: x.descripcion || '', pm: x.pm || '' }));
+  const lista = r.rows.map(x => ({ job: String(x.job_number || '').trim().toUpperCase(), cliente: x.customer || '', descripcion: x.descripcion || '', pm: x.pm || '' }));
+  // v2.31: centros de costo activos de la Suite (tabla centros_costo; si no existe aún, se omite)
+  try {
+    const cc = await db.q(`SELECT cid, data->>'nombre' AS nombre, data->>'tipo' AS tipo FROM centros_costo
+                           WHERE COALESCE((data->>'activo')::boolean, true) ORDER BY cid`);
+    for (const x of cc.rows) lista.push({ job: String(x.cid || '').trim().toUpperCase(), cliente: 'Centro de costo', descripcion: x.nombre || '', pm: '', tipo: 'cc' });
+  } catch (e) { /* la Suite aún no tiene centros de costo */ }
+  return lista;
 }
 app.get('/api/jobs-wip', aw(async (req, res) => {
   try { res.json(await jobsWip()); }
@@ -1027,7 +1034,7 @@ async function validarJobHours(lista, total, workerId) {
     const h = Math.round((parseFloat(it && it.hours) || 0) * 100) / 100;
     if (!job || h <= 0) continue;
     if (h > 24) return { error: `Horas inválidas en ${job}` };
-    if (job !== 'ADMIN' && wip && !wip.has(job)) return { error: `El Job ${job} no está en WIP en la Suite. Elige un Job de la lista o usa ADMIN.` };
+    if (job !== 'ADMIN' && wip && !wip.has(job)) return { error: `${job} no es un Job en WIP ni un centro de costo activo de la Suite. Elige uno de la lista o usa ADMIN.` };
     out[job] = Math.round(((out[job] || 0) + h) * 100) / 100; suma += h;
   }
   suma = Math.round(suma * 100) / 100;
@@ -1237,6 +1244,137 @@ function horasSalida(entradaIso, salidaIso) {
   return dow === 0 || dow === 6 ? { totalHours: total, baseHours: 0, extraHours: total }
                                 : { totalHours: total, baseHours: Math.min(total, lim), extraHours: Math.max(0, Math.round((total - lim) * 100) / 100) };
 }
+
+// ─── REGISTRO CONDICIONADO (v2.31) ──────────────────────────────────────────────
+// El trabajador que olvidó checar puede pedir un registro extemporáneo:
+//   · Entrada: solo del día en curso.   · Salida: del día en curso o del día anterior.
+// Queda como "pendiente" (no cuenta en el registro oficial) hasta que el administrador o RRHH lo
+// autorice con su contraseña. Se avisa por WhatsApp a los contactos de Notificaciones.
+async function avisarWhatsApp(texto) {
+  let destinos; try { destinos = await leerNotificaciones(); } catch (e) { destinos = []; }
+  for (const d of (destinos || []).filter(x => x.active && x.phone && x.apikey)) {
+    const url = `https://api.callmebot.com/whatsapp.php?phone=${encodeURIComponent(d.phone)}&text=${encodeURIComponent(texto)}&apikey=${encodeURIComponent(d.apikey)}`;
+    fetch(url).catch(e => console.error(`[WhatsApp] ${d.name || d.phone}:`, e.message));
+  }
+}
+const fechaLocalHoy = () => new Date().toLocaleDateString('en-CA', { timeZone: TZ_LOCAL });
+function pendienteApi(r) { return { id: r.id, workerId: r.worker_tid, workerName: r.worker_name, type: r.tipo, timestamp: r.ts, estado: r.estado, creado: r.creado, ...(r.data || {}) }; }
+
+app.post('/api/registros-condicionados', aw(async (req, res) => {
+  const b = req.body || {};
+  const workerId = String(b.workerId || ''), tipo = b.type;
+  const w = await trabajadorPorId(workerId);
+  if (!w) return res.status(404).json({ error: 'Trabajador no encontrado' });
+  if (!['entrada', 'salida'].includes(tipo)) return res.status(400).json({ error: 'Tipo inválido' });
+  const motivo = String(b.motivo || '').trim().slice(0, 300);
+  if (motivo.length < 5) return res.status(400).json({ error: 'Explica por qué no registraste a tiempo' });
+  const ts = new Date(b.timestamp || '');
+  if (isNaN(ts)) return res.status(400).json({ error: 'Indica la fecha y la hora' });
+  if (ts.getTime() > Date.now() + 60000) return res.status(400).json({ error: 'No se pueden registrar horas futuras' });
+  const dia = fechaLocalDe(ts.toISOString()), hoy = fechaLocalHoy(), ayer = sumarDias(hoy, -1);
+  if (tipo === 'entrada' && dia !== hoy) return res.status(400).json({ error: 'La entrada condicionada solo puede ser del día de hoy' });
+  if (tipo === 'salida' && dia !== hoy && dia !== ayer) return res.status(400).json({ error: 'La salida condicionada solo puede ser de hoy o de ayer' });
+  const ver = await verificarDispositivo(req, workerId, b.deviceId, b.deviceInfo);
+  if (ver.estado === 'pendiente' || ver.estado === 'rechazado') return res.status(403).json({ error: ver.mensaje || 'Dispositivo no autorizado' });
+  const pend = (await db.q(`SELECT id FROM kiosco_registros_pendientes WHERE worker_tid = $1 AND estado = 'pendiente'`, [workerId])).rows;
+  if (pend.length) return res.status(409).json({ error: 'Ya tienes un registro condicionado pendiente de autorizar. Espera a que RRHH lo revise.' });
+  // secuencia contra el registro oficial
+  let ant = (await db.q('SELECT tipo, ts, data FROM kiosco_registros WHERE worker_tid = $1 AND ts <= $2 ORDER BY ts DESC LIMIT 1', [workerId, ts.toISOString()])).rows[0];
+  let sig = (await db.q('SELECT tipo, ts, data FROM kiosco_registros WHERE worker_tid = $1 AND ts > $2 ORDER BY ts ASC LIMIT 1', [workerId, ts.toISOString()])).rows[0];
+  const esAuto = (x) => x && x.tipo === 'salida' && (x.data || {}).origen === 'auto';
+  if (tipo === 'salida') {      // una salida automática del mismo periodo se podrá reemplazar al autorizar
+    if (esAuto(sig)) sig = (await db.q('SELECT tipo, ts, data FROM kiosco_registros WHERE worker_tid = $1 AND ts > $2 ORDER BY ts ASC LIMIT 1', [workerId, sig.ts])).rows[0];
+    if (esAuto(ant)) ant = (await db.q('SELECT tipo, ts, data FROM kiosco_registros WHERE worker_tid = $1 AND ts < $2 ORDER BY ts DESC LIMIT 1', [workerId, ant.ts])).rows[0];
+  }
+  const fmt = (x) => new Date(x).toLocaleString('es-MX', { timeZone: TZ_LOCAL });
+  if (tipo === 'entrada') {
+    if (ant && ant.tipo === 'entrada') return res.status(409).json({ error: `Ya tienes una entrada (${fmt(ant.ts)}) sin salida.` });
+    if (sig) return res.status(409).json({ error: `Ya hay un registro después de esa hora (${sig.tipo} ${fmt(sig.ts)}).` });
+  } else {
+    if (!ant || ant.tipo !== 'entrada') return res.status(409).json({ error: 'No hay una entrada abierta antes de esa hora. Si también olvidaste la entrada, avisa a RRHH.' });
+    if (ts.getTime() - Date.parse(ant.ts) > 20 * 3600000) return res.status(409).json({ error: `La entrada abierta es del ${fmt(ant.ts)}: la salida no puede ser más de 20 h después.` });
+    if (sig) return res.status(409).json({ error: `Ya hay un registro después de esa hora (${sig.tipo} ${fmt(sig.ts)}).` });
+  }
+  const id = uuidv4();
+  const punto = (b.lat != null && b.lng != null) ? { lat: Number(b.lat), lng: Number(b.lng), accuracy: b.accuracy == null ? null : Number(b.accuracy) } : null;
+  const data = { motivo, punto, dispositivo: ver.dispositivo ? { tipo: ver.dispositivo.tipo, os: ver.dispositivo.os, navegador: ver.dispositivo.navegador } : null,
+                 solicitado: new Date().toISOString(), entrada_ts: tipo === 'salida' ? ant.ts : null };
+  await db.q('INSERT INTO kiosco_registros_pendientes (id, worker_tid, worker_name, tipo, ts, data) VALUES ($1,$2,$3,$4,$5,$6)',
+             [id, workerId, w.name, tipo, ts.toISOString(), JSON.stringify(data)]);
+  avisarWhatsApp(`🕒 Persico — Registro condicionado\n👤 ${w.name}\n${tipo === 'entrada' ? '🟢 Entrada' : '🔴 Salida'}: ${fmt(ts)}\n📝 ${motivo}\n\nAutoriza o rechaza en el kiosco → Reportes → Registros condicionados.`);
+  console.log(`[CONDICIONADO] ${w.name} solicitó ${tipo} ${ts.toISOString()}: ${motivo}`);
+  res.json({ success: true, pendiente: pendienteApi({ id, worker_tid: workerId, worker_name: w.name, tipo, ts: ts.toISOString(), estado: 'pendiente', data }) });
+}));
+
+app.get('/api/registros-condicionados', aw(async (req, res) => {
+  const params = [], cond = [];
+  if (req.query.workerId) { params.push(req.query.workerId); cond.push(`worker_tid = $${params.length}`); }
+  if (req.query.estado) { params.push(req.query.estado); cond.push(`estado = $${params.length}`); }
+  const r = await db.q(`SELECT * FROM kiosco_registros_pendientes ${cond.length ? 'WHERE ' + cond.join(' AND ') : ''} ORDER BY creado DESC LIMIT 500`, params);
+  res.json(r.rows.map(pendienteApi));
+}));
+
+app.post('/api/registros-condicionados/:id/resolver', aw(async (req, res) => {
+  const b = req.body || {};
+  const u = (await db.q('SELECT * FROM kiosco_usuarios WHERE username = $1', [String(b.adminUser || '')])).rows[0];
+  if (!u || !['admin', 'rrhh'].includes(u.role) || !(await bcrypt.compare(String(b.password || ''), u.password_hash)))
+    return res.status(401).json({ error: 'Contraseña incorrecta (solo administrador o RRHH)' });
+  const accion = b.accion === 'autorizar' ? 'autorizar' : 'rechazar';
+  const comentario = String(b.comentario || '').trim().slice(0, 300);
+  if (accion === 'rechazar' && comentario.length < 3) return res.status(400).json({ error: 'Escribe el motivo del rechazo' });
+  const resultado = await db.tx(async (c) => {
+    const p = (await c.query('SELECT * FROM kiosco_registros_pendientes WHERE id = $1 FOR UPDATE', [req.params.id])).rows[0];
+    if (!p) return { status: 404, body: { error: 'Registro no encontrado' } };
+    if (p.estado !== 'pendiente') return { status: 409, body: { error: `Este registro ya fue ${p.estado}` } };
+    const resol = { por: u.username, nombre: u.name, fecha: new Date().toISOString(), comentario };
+    if (accion === 'rechazar') {
+      await c.query(`UPDATE kiosco_registros_pendientes SET estado = 'rechazado', data = data || $2 WHERE id = $1`, [p.id, JSON.stringify({ resolucion: resol })]);
+      return { status: 200, body: { success: true, estado: 'rechazado' } };
+    }
+    await c.query('SELECT pg_advisory_xact_lock(hashtext($1))', ['kiosco-registro:' + p.worker_tid]);
+    // se vuelve a validar la secuencia contra el registro oficial al momento de autorizar
+    const ant = (await c.query('SELECT id, tipo, ts FROM kiosco_registros WHERE worker_tid = $1 AND ts <= $2 ORDER BY ts DESC LIMIT 1', [p.worker_tid, p.ts])).rows[0];
+    const sig = (await c.query('SELECT id, tipo, ts FROM kiosco_registros WHERE worker_tid = $1 AND ts > $2 ORDER BY ts ASC LIMIT 1', [p.worker_tid, p.ts])).rows[0];
+    let auto = null;
+    if (p.tipo === 'entrada') {
+      if ((ant && ant.tipo === 'entrada') || (sig && sig.tipo === 'entrada'))
+        return { status: 409, body: { error: 'La secuencia ya no lo permite: hay otra entrada alrededor de esa hora. Revisa los registros del trabajador.' } };
+    } else {
+      if (!ant || ant.tipo !== 'entrada') {
+        // ¿la salida automática ya cerró ese periodo? → se reemplaza por la salida autorizada
+        const a = (ant && ant.tipo === 'salida') ? (await c.query('SELECT id, tipo, ts, data FROM kiosco_registros WHERE id = $1', [ant.id])).rows[0] : null;
+        if (a && (a.data || {}).origen === 'auto') auto = a;
+        else return { status: 409, body: { error: 'Ya no hay una entrada abierta antes de esa hora.' } };
+      }
+      if (!auto && sig && sig.tipo === 'salida') {
+        const a = (await c.query('SELECT id, tipo, ts, data FROM kiosco_registros WHERE id = $1', [sig.id])).rows[0];
+        if ((a.data || {}).origen === 'auto') auto = a; else return { status: 409, body: { error: 'Ya hay una salida después de esa hora.' } };
+      }
+    }
+    const base = { lat: p.data.punto ? p.data.punto.lat : null, lng: p.data.punto ? p.data.punto.lng : null, locationId: null, locationName: 'Registro condicionado',
+                   inGeofence: false, origen: 'condicionado', condicionado: { motivo: p.data.motivo, solicitado: p.data.solicitado, autorizado: resol, pendiente_id: p.id },
+                   dispositivo: p.data.dispositivo || { tipo: 'condicionado' } };
+    let regId;
+    if (p.tipo === 'salida') {
+      const ent = auto ? (await c.query('SELECT id, tipo, ts FROM kiosco_registros WHERE worker_tid = $1 AND ts < $2 AND tipo = $3 ORDER BY ts DESC LIMIT 1', [p.worker_tid, auto.ts, 'entrada'])).rows[0] : ant;
+      const horas = horasSalida(ent.ts, p.ts);
+      const data = { ...base, ...horas, jobHours: [], horas_pendientes: horas.totalHours > 0 };
+      if (auto) { await c.query('UPDATE kiosco_registros SET ts = $2, data = $3 WHERE id = $1', [auto.id, p.ts, JSON.stringify({ ...data, salida_auto_reemplazada: { ts_auto: auto.ts } })]); regId = auto.id; }
+      else { regId = uuidv4(); await c.query('INSERT INTO kiosco_registros (id, worker_tid, worker_name, tipo, ts, data) VALUES ($1,$2,$3,$4,$5,$6)', [regId, p.worker_tid, p.worker_name, 'salida', p.ts, JSON.stringify(data)]); }
+    } else {
+      regId = uuidv4();
+      await c.query('INSERT INTO kiosco_registros (id, worker_tid, worker_name, tipo, ts, data) VALUES ($1,$2,$3,$4,$5,$6)', [regId, p.worker_tid, p.worker_name, 'entrada', p.ts, JSON.stringify(base)]);
+    }
+    await c.query(`UPDATE kiosco_registros_pendientes SET estado = 'autorizado', data = data || $2 WHERE id = $1`, [p.id, JSON.stringify({ resolucion: resol, registro_id: regId })]);
+    return { status: 200, body: { success: true, estado: 'autorizado', registro_id: regId, reemplazo_salida_automatica: !!auto } };
+  });
+  res.status(resultado.status).json(resultado.body);
+}));
+app.post('/api/registros-condicionados/:id/cancelar', aw(async (req, res) => {
+  const r = await db.q(`UPDATE kiosco_registros_pendientes SET estado = 'cancelado' WHERE id = $1 AND worker_tid = $2 AND estado = 'pendiente' RETURNING id`, [req.params.id, String((req.body || {}).workerId || '')]);
+  if (!r.rows.length) return res.status(404).json({ error: 'No hay un registro pendiente que cancelar' });
+  res.json({ success: true });
+}));
 
 // ─── SALIDA AUTOMÁTICA POR VENCIMIENTO (v2.25) ─────────────────────────────────
 // Si una Entrada sigue sin Salida a la HORA DE CORTE del día siguiente (por defecto 03:00, hora

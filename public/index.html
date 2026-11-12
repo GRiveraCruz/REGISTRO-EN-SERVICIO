@@ -584,6 +584,31 @@
   </div>
 </div>
 
+<!-- v2.31: registro condicionado (trabajador) -->
+<div class="modal-overlay" id="condModal">
+  <div class="modal" style="max-width:460px;">
+    <div class="modal-drag"></div>
+    <div class="modal-title">🕒 Registro condicionado</div>
+    <div style="font-size:12.5px;color:var(--ink-soft);margin:-6px 0 12px">¿Olvidaste checar? Registra la hora real. Queda <b>pendiente</b> y solo cuenta cuando RRHH o el administrador lo autoricen.</div>
+    <div class="form-group"><label>¿Qué olvidaste registrar?</label>
+      <select id="condTipo" onchange="condTipoCambio()"><option value="entrada|hoy">🟢 Entrada de hoy</option><option value="salida|hoy">🔴 Salida de hoy</option><option value="salida|ayer">🔴 Salida de ayer</option></select></div>
+    <div class="form-group"><label>Hora real</label><input type="time" id="condHora"></div>
+    <div class="form-group"><label>Motivo</label><textarea id="condMotivo" rows="2" placeholder="ej. Se me olvidó checar al salir; salí a las 18:00"></textarea></div>
+    <div class="modal-actions"><button class="btn btn-secondary" onclick="closeModal('condModal')">Cancelar</button><button class="btn btn-primary" onclick="condEnviar()">Enviar para autorización</button></div>
+  </div>
+</div>
+<!-- v2.31: registros condicionados (admin / RRHH) -->
+<div class="modal-overlay" id="condAdmModal">
+  <div class="modal" style="max-width:820px;">
+    <div class="modal-drag"></div>
+    <div class="modal-title">🕒 Registros condicionados</div>
+    <div style="font-size:12.5px;color:var(--ink-soft);margin:-6px 0 10px">Registros extemporáneos que pidieron los trabajadores. No cuentan en el registro oficial hasta que se autorizan (con tu contraseña).</div>
+    <div style="display:flex;gap:8px;margin-bottom:8px"><select id="condAdmEstado" onchange="condAdmListar()"><option value="pendiente">Pendientes</option><option value="">Todos</option><option value="autorizado">Autorizados</option><option value="rechazado">Rechazados</option></select></div>
+    <div class="table-wrap"><table><thead><tr><th>Trabajador</th><th>Tipo</th><th>Fecha y hora</th><th>Motivo</th><th>Solicitado</th><th>Estado</th><th></th></tr></thead><tbody id="condAdmBody"></tbody></table></div>
+    <div class="modal-actions"><button class="btn btn-secondary btn-full" onclick="closeModal('condAdmModal')">Cerrar</button></div>
+  </div>
+</div>
+
 <!-- v2.25: salidas automáticas por vencimiento -->
 <div class="modal-overlay" id="autoModal">
   <div class="modal" style="max-width:760px;">
@@ -790,6 +815,8 @@
       </div>
       <div id="pausaHint" style="text-align:center;font-size:12px;color:#b45309;margin-top:-10px;margin-bottom:6px"></div>
       <div id="lastRecordHint" style="text-align:center;font-size:12px;color:var(--ink-soft);margin-top:8px"></div>
+      <!-- v2.31: registro condicionado -->
+      <div id="condBox" style="text-align:center;margin-top:10px"></div>
       <!-- v2.4: reloj + cardex del trabajador -->
       <div class="attendance-hero" style="margin-top:18px">
         <div class="clock" id="clockDisplay">00:00:00</div>
@@ -1172,7 +1199,8 @@
       <div style="display:flex;align-items:flex-start;gap:10px;flex-wrap:wrap">
         <div><div class="section-title">📊 Reportes de Asistencia</div>
         <div class="section-sub">Registro general y reporte semanal por trabajador</div></div>
-        <button class="btn btn-secondary btn-sm" id="btnAutoCierre" onclick="autoAbrir()" style="margin-left:auto;display:none">⏰ Salidas automáticas</button>
+        <button class="btn btn-secondary btn-sm" id="btnCondAdm" onclick="condAdmAbrir()" style="margin-left:auto;display:none">🕒 Registros condicionados</button>
+        <button class="btn btn-secondary btn-sm" id="btnAutoCierre" onclick="autoAbrir()" style="display:none">⏰ Salidas automáticas</button>
         <button class="btn btn-primary btn-sm" id="btnRegistroManual" onclick="manAbrir()" style="display:none">➕ Registro manual</button>
       </div>
 
@@ -2851,6 +2879,72 @@ async function asignarPuntoNoAsignado(locId, workerId, nombre) {          // v2.
   toast('Punto asignado', 'success'); await loadWorkers(); cargarGeo();
 }
 
+// ═══ v2.31 — Registro condicionado ═══
+let _condPend = null;
+async function condCargar() {
+  const box = document.getElementById('condBox'); if (!box || !currentUser || currentUser.role !== 'worker') return;
+  try { const L = await (await fetch(`/api/registros-condicionados?workerId=${encodeURIComponent(currentUser.id)}&estado=pendiente`)).json(); _condPend = L[0] || null; } catch (e) { _condPend = null; }
+  if (_condPend) {
+    const f = new Date(_condPend.timestamp).toLocaleString('es-MX', { weekday: 'short', day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit' });
+    box.innerHTML = `<div style="display:inline-block;padding:8px 14px;border-radius:10px;background:#fef3c7;color:#92400e;font-size:12.5px">🕒 Registro condicionado <b>pendiente de autorizar</b>: ${_condPend.type === 'entrada' ? 'Entrada' : 'Salida'} ${f} · <a href="#" onclick="condCancelar();return false" style="color:#c8102e">cancelar</a></div>`;
+  } else {
+    // historial reciente (autorizados / rechazados de los últimos días)
+    let ult = null; try { const L = await (await fetch(`/api/registros-condicionados?workerId=${encodeURIComponent(currentUser.id)}`)).json(); ult = L.find(x => x.estado !== 'pendiente' && x.estado !== 'cancelado' && x.resolucion && Date.now() - Date.parse(x.resolucion.fecha) < 3 * 86400000); } catch (e) {}
+    box.innerHTML = (ult ? `<div style="font-size:12px;margin-bottom:6px;color:${ult.estado === 'autorizado' ? '#15803d' : '#c8102e'}">${ult.estado === 'autorizado' ? '✓ Se autorizó' : '✗ Se rechazó'} tu registro condicionado (${ult.type} ${new Date(ult.timestamp).toLocaleString('es-MX', { day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit' })})${ult.resolucion && ult.resolucion.comentario ? ': ' + escapeHtml(ult.resolucion.comentario) : ''}</div>` : '')
+      + `<button class="btn btn-secondary btn-sm" onclick="condAbrir()" style="border-style:dashed">🕒 ¿Olvidaste checar? Registro condicionado</button>`;
+  }
+}
+function condTipoCambio() {}
+function condAbrir() {
+  document.getElementById('condHora').value = new Date().toTimeString().slice(0, 5);
+  document.getElementById('condMotivo').value = '';
+  const u = getLastRecord(); document.getElementById('condTipo').value = (u && u.type === 'entrada') ? 'salida|hoy' : 'entrada|hoy';
+  document.getElementById('condModal').classList.add('open');
+}
+async function condEnviar() {
+  const [tipo, dia] = document.getElementById('condTipo').value.split('|');
+  const h = document.getElementById('condHora').value; if (!h) return toast('Indica la hora', 'error');
+  const d = new Date(); if (dia === 'ayer') d.setDate(d.getDate() - 1);
+  const [hh, mm] = h.split(':').map(Number); d.setHours(hh, mm, 0, 0);
+  if (d.getTime() > Date.now()) return toast('La hora no puede ser futura', 'error');
+  const body = { workerId: currentUser.id, type: tipo, timestamp: d.toISOString(), motivo: document.getElementById('condMotivo').value,
+                 deviceId: obtenerDeviceId(), deviceInfo: infoDispositivo(), lat: currentLat, lng: currentLng };
+  const r = await fetch('/api/registros-condicionados', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+  const x = await r.json(); if (!r.ok) return toast(x.error || 'No se pudo enviar', 'error');
+  closeModal('condModal'); toast('Registro enviado: queda pendiente de autorización', 'success'); condCargar();
+}
+async function condCancelar() {
+  if (!_condPend || !confirm('¿Cancelar tu registro condicionado pendiente?')) return;
+  await fetch(`/api/registros-condicionados/${_condPend.id}/cancelar`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ workerId: currentUser.id }) });
+  condCargar();
+}
+async function condAdmContar() {
+  try { const L = await (await fetch('/api/registros-condicionados?estado=pendiente')).json(); const b = document.getElementById('btnCondAdm'); if (b) b.textContent = `🕒 Registros condicionados${L.length ? ` (${L.length})` : ''}`; } catch (e) {}
+}
+function condAdmAbrir() { condAdmListar(); document.getElementById('condAdmModal').classList.add('open'); }
+async function condAdmListar() {
+  const est = document.getElementById('condAdmEstado').value;
+  const L = await (await fetch('/api/registros-condicionados' + (est ? `?estado=${est}` : ''))).json();
+  const f = (t) => new Date(t).toLocaleString('es-MX', { weekday: 'short', day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit' });
+  const col = { pendiente: '#b45309', autorizado: '#15803d', rechazado: '#c8102e', cancelado: '#64748b' };
+  document.getElementById('condAdmBody').innerHTML = L.map(x => `<tr><td><strong>${escapeHtml(x.workerName)}</strong></td><td>${x.type === 'entrada' ? '🟢 Entrada' : '🔴 Salida'}</td><td style="white-space:nowrap">${f(x.timestamp)}</td>
+      <td style="font-size:12px">${escapeHtml(x.motivo || '')}${x.entrada_ts ? `<div style="font-size:11px;color:var(--ink-soft)">entrada: ${f(x.entrada_ts)}</div>` : ''}</td><td style="font-size:11.5px;white-space:nowrap">${f(x.solicitado || x.creado)}</td>
+      <td style="color:${col[x.estado] || 'inherit'};font-weight:700">${x.estado}${x.resolucion ? `<div style="font-size:10.5px;font-weight:400;color:var(--ink-soft)">${escapeHtml(x.resolucion.por)}${x.resolucion.comentario ? ': ' + escapeHtml(x.resolucion.comentario) : ''}</div>` : ''}</td>
+      <td>${x.estado === 'pendiente' ? `<div style="display:flex;flex-direction:column;gap:4px"><button class="btn btn-primary btn-sm" onclick="condResolver('${x.id}','autorizar')">Autorizar</button><button class="btn btn-secondary btn-sm" onclick="condResolver('${x.id}','rechazar')">Rechazar</button></div>` : ''}</td></tr>`).join('')
+    || '<tr><td colspan="7" style="text-align:center;color:var(--ink-soft);padding:16px">Sin registros</td></tr>';
+  condAdmContar();
+}
+async function condResolver(id, accion) {
+  let comentario = '';
+  if (accion === 'rechazar') { comentario = prompt('Motivo del rechazo (lo verá el trabajador):', ''); if (comentario === null) return; }
+  const pw = prompt(`Para ${accion} el registro, escribe tu contraseña (${currentUser.username}):`, ''); if (pw === null) return;
+  const r = await fetch(`/api/registros-condicionados/${id}/resolver`, { method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ adminUser: currentUser.username, password: pw, accion, comentario }) });
+  const d = await r.json(); if (!r.ok) return toast(d.error || 'No se pudo', 'error');
+  toast(accion === 'autorizar' ? `Autorizado: pasó al registro oficial${d.reemplazo_salida_automatica ? ' (reemplazó la salida automática)' : ''}` : 'Rechazado', 'success');
+  condAdmListar();
+}
+
 function mostrarLoginAdmin(si){
   document.getElementById('loginWorkerBox').style.display = si ? 'none' : '';
   document.getElementById('loginAdminBox').style.display = si ? '' : 'none';
@@ -2897,6 +2991,7 @@ async function startApp() {
     await verificarDispositivoSesion();                   // v2.6
     await cargarEstadoPausa();                            // v2.9
     setTimeout(revisarHorasPendientes, 800);              // v2.18: salidas del checador sin repartir
+    setTimeout(condCargar, 600);                          // v2.31: registro condicionado
     try { ESPERA_MIN = (await (await fetch('/api/config/registro')).json()).espera_minutos ?? 5; } catch (e) {}
     // Pre-load this worker's records so entrada lookup works for job hours modal
     const r = await fetch(`/api/records?workerId=${currentUser.id}`);
@@ -2988,7 +3083,8 @@ function showPanel(id) {
   if (id === 'geo') cargarGeo();
   if (id === 'checador') cargarChecador();
   if (id === 'reportes') { const bm = document.getElementById('btnRegistroManual'); if (bm) bm.style.display = currentUser && currentUser.role === 'admin' ? '' : 'none';
-    const ba = document.getElementById('btnAutoCierre'); if (ba) ba.style.display = currentUser && ['admin', 'rrhh'].includes(currentUser.role) ? '' : 'none'; }
+    const ba = document.getElementById('btnAutoCierre'); if (ba) ba.style.display = currentUser && ['admin', 'rrhh'].includes(currentUser.role) ? '' : 'none';
+    const bc = document.getElementById('btnCondAdm'); if (bc) { bc.style.display = ba ? ba.style.display : 'none'; condAdmContar(); } }
   if (id === 'contingencia') { document.getElementById('ctgVista').innerHTML = ''; document.getElementById('ctgBtn').style.display = 'none'; }
 }
 
