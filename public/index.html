@@ -1065,6 +1065,10 @@
         <div style="font-size:12px;color:var(--ink-soft);margin-bottom:8px">Número del empleado en el checador → trabajador de Control de Personal. Se propone sola por nombre; corrige las que falten. Las checadas sin relación quedan en espera y se procesan al relacionarlas.</div>
         <div class="table-wrap"><table><thead><tr><th>No. checador</th><th>Nombre en el checador</th><th>Trabajador</th><th>Checadas</th><th>Última</th></tr></thead><tbody id="chkMap"></tbody></table></div>
       </div>
+      <div class="card">
+        <label style="display:flex;gap:8px;align-items:flex-start;font-size:13px"><input type="checkbox" id="chkPedirHoras" onchange="chkGuardarOpciones()">
+          <span><b>Pedir al trabajador que reparta por Job las horas de sus salidas del checador</b><br><span style="color:var(--ink-soft);font-size:12px">Desactivado por ahora: las checadas se registran como entradas y salidas, pero el kiosco no le pide al trabajador distribuir esas horas. Al activarlo, se le pedirán todas las salidas del checador que estén pendientes.</span></span></label>
+      </div>
       <div class="card"><div style="font-weight:700;margin-bottom:6px">Para revisar</div><div id="chkRevisar" style="font-size:13px"></div></div>
     </div>
 
@@ -2788,9 +2792,17 @@ async function cargarChecador() {
   document.getElementById('chkMap').innerHTML = (d.codigos || []).map(x => `<tr style="${x.worker_tid ? '' : 'background:rgba(220,38,38,.05)'}"><td><strong>${x.emp_code}</strong></td><td>${x.emp_nombre || ''}</td>
       <td><select onchange="chkRelacionar('${x.emp_code}', this.value, '${(x.emp_nombre || '').replace(/'/g, '')}')">${opts(x.worker_tid)}</select></td><td>${x.marcas}</td><td style="font-size:12px">${x.ultima ? new Date(x.ultima).toLocaleString('es-MX') : ''}</td></tr>`).join('')
     || '<tr><td colspan="5" style="text-align:center;color:var(--ink-soft);padding:20px">Aún no llegan checadas del puente</td></tr>';
+  { const cb = document.getElementById('chkPedirHoras'); if (cb) { cb.checked = !!d.pedir_horas; cb.disabled = !(currentUser && currentUser.role === 'admin'); } }
   const imp = d.impares || [], ph = d.horas_pendientes || [];
   document.getElementById('chkRevisar').innerHTML = (imp.length ? `<div style="margin-bottom:8px"><b>Días con checadas impares</b> (faltó la entrada o la salida, últimos 14 días): ${imp.map(x => `${x.emp_nombre || x.worker_tid} — ${x.dia} (${x.n})`).join(' · ')}<div style="font-size:11.5px;color:var(--ink-soft)">Complétalos con "➕ Registro manual" en Reportes.</div></div>` : '<div style="color:#15803d;margin-bottom:8px">✓ Sin días con checadas impares</div>')
-    + (ph.length ? `<div><b>Trabajadores con horas por repartir</b> (salidas del checador): ${ph.map(x => `${x.worker_name} (${x.n})`).join(' · ')}<div style="font-size:11.5px;color:var(--ink-soft)">Se les pide al abrir el kiosco en su celular.</div></div>` : '<div style="color:#15803d">✓ Sin horas pendientes de repartir</div>');
+    + (ph.length ? `<div><b>Trabajadores con horas por repartir</b> (salidas del checador): ${ph.map(x => `${x.worker_name} (${x.n})`).join(' · ')}<div style="font-size:11.5px;color:var(--ink-soft)">${d.pedir_horas ? 'Se les pide al abrir el kiosco en su celular.' : 'Por ahora no se les pide (opción desactivada arriba).'}</div></div>` : '<div style="color:#15803d">✓ Sin horas pendientes de repartir</div>');
+}
+async function chkGuardarOpciones() {                                       // v2.29
+  const v = document.getElementById('chkPedirHoras').checked;
+  if (v && !confirm('Al activarlo, cada trabajador deberá repartir TODAS sus salidas del checador pendientes (también las de días anteriores). ¿Activar?')) { document.getElementById('chkPedirHoras').checked = false; return; }
+  const r = await fetch('/api/checador/opciones', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ pedir_horas: v }) });
+  if (!r.ok) return toast('No se pudo guardar', 'error');
+  toast(v ? 'Se pedirán las horas de las salidas del checador' : 'Ya no se piden las horas de las salidas del checador', 'success'); cargarChecador();
 }
 async function chkRelacionar(emp_code, worker_tid, emp_nombre) {
   const r = await fetch('/api/checador/map', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ emp_code, worker_tid, emp_nombre }) });

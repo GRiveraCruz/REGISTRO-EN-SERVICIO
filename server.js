@@ -1263,6 +1263,13 @@ async function cerrarSalidasVencidas({ aplicar = true, ahora = Date.now() } = {}
     const corte = Date.parse(limiteLocal(`${sumarDias(fechaLocalDe(e.ts), 1)}T${cfg.hora_corte}:00`, false));
     const limite = Math.max(corte, Date.parse(e.ts) + Number(cfg.horas_minimas_abierta || 16) * 3600000);
     if (ahora < limite) continue;
+    // v2.30: si la entrada vino del checador y el puente no ha enviado checadas desde antes del corte
+    // (PC apagada o sin red), se espera: la salida real puede venir en camino. Máximo 48 h de espera.
+    if ((e.data || {}).origen === 'checador') {
+      const ult = await db.getConfig('checador_ultimo_envio', null);
+      const ultMs = ult && ult.fecha ? Date.parse(ult.fecha) : 0;
+      if (ultMs < limite && ahora < limite + 48 * 3600000) continue;
+    }
     const horasJ = jornadaNormalHoras(e.ts, cfg);
     const salidaTs = new Date(Date.parse(e.ts) + horasJ * 3600000).toISOString();
     const item = { worker_tid: e.worker_tid, worker_name: e.worker_name, entrada: e.ts, salida: salidaTs, horas: horasJ };
@@ -1499,6 +1506,71 @@ app.get('/api/records/manual/horas', aw(async (req, res) => {
 const CHECADOR_KEY = (process.env.CHECADOR_KEY || '').trim();
 const CHECADOR_DOBLE_MIN = Number(process.env.CHECADOR_DOBLE_MIN || 3);   // checadas a menos de N min = repetida
 
+// ─── v2.30: checadas que llegan después de una SALIDA AUTOMÁTICA ──────────────────
+// Si la checada real de salida llega tarde (p. ej. la PC del puente estuvo apagada), la salida
+// automática ya existe. Antes la checada se tomaba como una ENTRADA nueva y la siguiente checada
+// (la llegada del día siguiente) como salida. Ahora la checada REEMPLAZA a la salida automática del
+// mismo periodo (hasta 20 h después de su entrada) y se recalcula la secuencia que siga.
+const VENTANA_PERIODO_MS = 20 * 3600000;
+const datosChecador = (m) => ({ lat: null, lng: null, locationId: null, locationName: 'Checador planta', inGeofence: true, origen: 'checador',
+  checador_id: m.id, checador: { emp_code: m.emp_code, terminal_sn: m.terminal_sn, verify_type: m.verify_type,
+    metodo: ({ 1: 'huella', 15: 'rostro', 4: 'tarjeta', 3: 'contraseña' })[m.verify_type] || String(m.verify_type ?? '') },
+  dispositivo: { tipo: 'checador', os: 'ZKTeco', navegador: m.terminal_sn || '', autorizado: true } });
+async function reemplazarSalidaAuto(c, auto, entrada, ts, datosNuevos) {
+  const prev = auto.data || {};
+  const horas = horasSalida(entrada.ts, ts);
+  const conJobs = Array.isArray(prev.jobHours) && prev.jobHours.length;
+  const data = { ...datosNuevos, ...horas, jobHours: conJobs ? prev.jobHours : [], horas_pendientes: !conJobs,
+                 revisar_horas: conJobs && Math.abs((prev.totalHours || 0) - horas.totalHours) > 0.01 ? true : undefined,
+                 salida_auto_reemplazada: { ts_auto: auto.ts, horas_auto: prev.totalHours, fecha: new Date().toISOString() } };
+  if (prev.viaje) data.viaje = prev.viaje;
+  await c.query('UPDATE kiosco_registros SET ts = $2, data = $3 WHERE id = $1', [auto.id, ts, JSON.stringify(data)]);
+  console.log(`[CHECADOR] salida automática ${auto.ts} reemplazada por la checada real ${ts}`);
+}
+async function resecuenciarChecador(c, workerId, desdeTs) {
+  const rs = (await c.query('SELECT id, tipo, ts, data FROM kiosco_registros WHERE worker_tid = $1 AND ts >= $2 ORDER BY ts', [workerId, desdeTs])).rows;
+  if (!rs.length) return 0;
+  let prev = rs[0], cambios = 0;
+  for (const r of rs.slice(1)) {
+    if ((r.data || {}).origen !== 'checador') break;
+    const esperado = prev.tipo === 'entrada' && (Date.parse(r.ts) - Date.parse(prev.ts)) < 16 * 3600000 ? 'salida' : 'entrada';
+    if (r.tipo !== esperado) {
+      const d = { ...(r.data || {}) };
+      if (esperado === 'salida') Object.assign(d, horasSalida(prev.ts, r.ts), { horas_pendientes: true, jobHours: [] });
+      else for (const k of ['totalHours', 'baseHours', 'extraHours', 'jobHours', 'horas_pendientes', 'revisar_horas']) delete d[k];
+      await c.query('UPDATE kiosco_registros SET tipo = $2, data = $3 WHERE id = $1', [r.id, esperado, JSON.stringify(d)]);
+      await c.query(`UPDATE kiosco_checador_marcas SET tipo = $2 WHERE registro_id = $1`, [r.id, esperado]);
+      r.tipo = esperado; cambios++;
+    }
+    prev = r;
+  }
+  return cambios;
+}
+// Repara los casos que ya quedaron mal: salida automática seguida de una checada del mismo periodo
+async function repararAutoChecador() {
+  const autos = (await db.q(`SELECT id, worker_tid, ts, data FROM kiosco_registros WHERE tipo = 'salida' AND data->>'origen' = 'auto' ORDER BY ts`)).rows;
+  const arreglados = [];
+  for (const a of autos) {
+    const r = await db.tx(async (c) => {
+      await c.query('SELECT pg_advisory_xact_lock(hashtext($1))', ['kiosco-registro:' + a.worker_tid]);
+      const auto = (await c.query('SELECT id, worker_tid, ts, data, tipo FROM kiosco_registros WHERE id = $1', [a.id])).rows[0];
+      if (!auto || (auto.data || {}).origen !== 'auto') return null;
+      const ent = (await c.query('SELECT id, tipo, ts FROM kiosco_registros WHERE worker_tid = $1 AND ts < $2 ORDER BY ts DESC LIMIT 1', [auto.worker_tid, auto.ts])).rows[0];
+      const sig = (await c.query('SELECT id, tipo, ts, data FROM kiosco_registros WHERE worker_tid = $1 AND ts > $2 ORDER BY ts ASC LIMIT 1', [auto.worker_tid, auto.ts])).rows[0];
+      if (!ent || ent.tipo !== 'entrada' || !sig || (sig.data || {}).origen !== 'checador' || Date.parse(sig.ts) - Date.parse(ent.ts) > VENTANA_PERIODO_MS) return null;
+      await reemplazarSalidaAuto(c, auto, ent, sig.ts, { ...sig.data });
+      await c.query('DELETE FROM kiosco_registros WHERE id = $1', [sig.id]);
+      await c.query(`UPDATE kiosco_checador_marcas SET registro_id = $2, tipo = 'salida' WHERE registro_id = $1`, [sig.id, auto.id]);
+      const cambios = await resecuenciarChecador(c, auto.worker_tid, sig.ts);
+      return { worker_tid: auto.worker_tid, salida_auto: auto.ts, salida_real: sig.ts, resecuenciados: cambios };
+    });
+    if (r) arreglados.push(r);
+  }
+  if (arreglados.length) console.log(`[CHECADOR] reparados ${arreglados.length} periodo(s) con salida automática + checada tardía`);
+  return arreglados;
+}
+app.post('/api/checador/reparar-auto', aw(async (req, res) => res.json({ reparados: await repararAutoChecador() })));
+
 async function procesarMarcasChecador() {
   const pend = (await db.q(`SELECT m.*, mp.worker_tid FROM kiosco_checador_marcas m
                             LEFT JOIN kiosco_checador_map mp ON mp.emp_code = m.emp_code
@@ -1518,6 +1590,23 @@ async function procesarMarcasChecador() {
       // misma checada ya registrada (p. ej. reenvío) → se liga
       const ya = (await c.query(`SELECT id FROM kiosco_registros WHERE data->>'checador_id' = $1 LIMIT 1`, [m.id])).rows[0];
       if (ya) { await c.query(`UPDATE kiosco_checador_marcas SET estado='procesada', registro_id=$2 WHERE id=$1`, [m.id, ya.id]); return; }
+      // v2.30: ¿esta checada es la salida real de un periodo que ya se cerró en automático?
+      {
+        let auto = null, ent = null;
+        if (ant && ant.tipo === 'salida' && (ant.data || {}).origen === 'auto') {            // la checada llega después de la hora automática
+          ent = (await c.query('SELECT id, tipo, ts FROM kiosco_registros WHERE worker_tid = $1 AND ts < $2 ORDER BY ts DESC LIMIT 1', [w.id, ant.ts])).rows[0];
+          auto = ant;
+        } else if (ant && ant.tipo === 'entrada') {                                           // o antes (salió más temprano)
+          const sig = (await c.query('SELECT id, tipo, ts, data FROM kiosco_registros WHERE worker_tid = $1 AND ts > $2 ORDER BY ts ASC LIMIT 1', [w.id, m.punch_time])).rows[0];
+          if (sig && sig.tipo === 'salida' && (sig.data || {}).origen === 'auto') { auto = sig; ent = ant; }
+        }
+        if (auto && ent && ent.tipo === 'entrada' && Date.parse(m.punch_time) - Date.parse(ent.ts) <= VENTANA_PERIODO_MS && Date.parse(m.punch_time) > Date.parse(ent.ts)) {
+          await reemplazarSalidaAuto(c, auto, ent, m.punch_time, datosChecador(m));
+          await c.query(`UPDATE kiosco_checador_marcas SET estado='procesada', registro_id=$2, tipo='salida' WHERE id=$1`, [m.id, auto.id]);
+          await resecuenciarChecador(c, w.id, m.punch_time);
+          procesadas++; return;
+        }
+      }
       // alterna: si lo anterior es una entrada del mismo día (o de hace menos de 16 h) → salida
       const esSalida = ant && ant.tipo === 'entrada' && (Date.parse(m.punch_time) - Date.parse(ant.ts)) < 16 * 3600000;
       const tipo = esSalida ? 'salida' : 'entrada';
@@ -1582,7 +1671,7 @@ app.get('/api/checador/estado', aw(async (req, res) => {
                                GROUP BY mp.worker_tid, dia
                                HAVING count(*) FILTER (WHERE m.estado = 'procesada') % 2 = 1 ORDER BY dia DESC`, [new Date(Date.now() - 16 * 86400000).toISOString(), TZ_LOCAL])).rows;
   const pendHoras = (await db.q(`SELECT worker_name, count(*)::int AS n FROM kiosco_registros WHERE (data->>'horas_pendientes')::boolean IS TRUE GROUP BY worker_name ORDER BY n DESC`)).rows;
-  res.json({ ultimo_envio: ult, cuentas, codigos, impares, horas_pendientes: pendHoras, clave_configurada: !!CHECADOR_KEY });
+  res.json({ ultimo_envio: ult, cuentas, codigos, impares, horas_pendientes: pendHoras, clave_configurada: !!CHECADOR_KEY, pedir_horas: await checadorPideHoras() });
 }));
 
 app.put('/api/checador/map', aw(async (req, res) => {
@@ -1596,9 +1685,19 @@ app.put('/api/checador/map', aw(async (req, res) => {
 }));
 
 // salidas del checador con horas por repartir (el kiosco se las pide al trabajador)
+// v2.29: por ahora NO se le pide al trabajador repartir las horas de las salidas del checador de
+// planta (se activará más adelante desde ⏱ Checador). Las salidas automáticas sí se siguen pidiendo.
+async function checadorPideHoras() { return !!(((await db.getConfig('checador_opciones', {})) || {}).pedir_horas); }
 app.get('/api/records/horas-pendientes', aw(async (req, res) => {
-  const r = await db.q(`SELECT * FROM kiosco_registros WHERE worker_tid = $1 AND (data->>'horas_pendientes')::boolean IS TRUE ORDER BY ts`, [String(req.query.workerId || '')]);
+  const pedirChecador = await checadorPideHoras();
+  const r = await db.q(`SELECT * FROM kiosco_registros WHERE worker_tid = $1 AND (data->>'horas_pendientes')::boolean IS TRUE
+                        ${pedirChecador ? '' : "AND COALESCE(data->>'origen', '') <> 'checador'"} ORDER BY ts`, [String(req.query.workerId || '')]);
   res.json(r.rows.map(registro));
+}));
+app.get('/api/checador/opciones', aw(async (req, res) => res.json({ pedir_horas: await checadorPideHoras() })));
+app.put('/api/checador/opciones', aw(async (req, res) => {
+  const cfg = { ...((await db.getConfig('checador_opciones', {})) || {}), pedir_horas: !!(req.body || {}).pedir_horas };
+  await db.setConfig('checador_opciones', cfg); res.json({ success: true, opciones: cfg });
 }));
 
 // Completar un registro (horas por Job al salir) o edición del administrador
@@ -1766,6 +1865,7 @@ async function arrancar() {
   await db.setConfig('kiosco_bd', { version: 2, arranque: new Date().toISOString() });
   app.listen(PORT, () => console.log(`Persico Attendance (PostgreSQL compartida) running on port ${PORT}`));
   setTimeout(cicloAutoCierre, 15000); setInterval(cicloAutoCierre, 10 * 60000);          // v2.25: salidas vencidas cada 10 min
+  setTimeout(() => repararAutoChecador().catch(e => console.warn('[CHECADOR] reparación:', e.message)), 8000);   // v2.30
 }
 
 arrancar().catch(e => { console.error('[kiosco] No se pudo arrancar:', e.message); process.exit(1); });

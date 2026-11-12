@@ -1049,3 +1049,78 @@ Es el tipo predeterminado al abrir "➕ Registro manual".
 - **Guardar el kiosco como favorito en Safari** o agregarlo a la pantalla de inicio, y **usar
   siempre el mismo**.
 - **No abrirlo desde el lector de QR** de otras apps, ni en pestañas privadas.
+
+---
+
+# v2.29 — Pausa: no se piden las horas por Job de las salidas del checador de planta
+
+- **Por ahora, el kiosco ya NO le pide al trabajador repartir por Job las horas de sus salidas del
+  checador** (MB160). Esto incluye los días anteriores.
+- **Las checadas se siguen recibiendo y registrando** como entradas y salidas, con sus horas base
+  y extra. Solo se deja de pedir la distribución.
+- **Las salidas automáticas** (cuando el trabajador olvida checar salida) **sí se siguen
+  pidiendo**.
+- **Casilla nueva en ⏱ Checador** (solo admin): "Pedir al trabajador que reparta por Job las horas
+  de sus salidas del checador".
+  - **Desactivada por defecto.**
+  - **Al activarla,** con confirmación, se pedirán todas las salidas del checador pendientes,
+    también las anteriores.
+- **"Para revisar"** sigue mostrando quién tiene horas del checador por repartir, con la nota "Por
+  ahora no se les pide".
+- **API:** `GET/PUT /api/checador/opciones` (`pedir_horas`).
+
+## Probado
+- **Desactivado:** el trabajador solo tiene pendiente la salida automática; la del checador ya no
+  se pide.
+- **Activado:** se piden las dos.
+- **Desactivado otra vez:** solo la automática.
+
+---
+
+# v2.30 — Checador: la checada real reemplaza a la salida automática
+
+## Qué pasó (caso Reyes Trujillo, 11-nov)
+- **Secuencia:**
+  - **Entrada** en el checador a las 8:15 a.m.
+  - El trabajador checó salida a las **9:05 p.m.**, pero esa checada **llegó al kiosco hasta la
+    mañana siguiente**: el puente de la PC de planta no la envió durante la noche (PC apagada o sin
+    red).
+  - A las **3:00 a.m.** el kiosco no tenía salida y registró la **salida automática** con la
+    jornada normal (8:15 + 10 h = **6:15 p.m.**).
+  - Cuando por fin llegó la checada de las 9:05 p.m., el kiosco ya veía una salida antes, así que
+    la tomó como **Entrada**. La checada de llegada del día siguiente (7:54 a.m.) se tomó como
+    **Salida** de 10.81 h.
+- **Así quedaron dos periodos equivocados.**
+
+## Corrección
+1. **La checada real reemplaza a la salida automática** del mismo periodo (hasta 20 h después de
+   su entrada):
+   - funciona si la checada llega **después** de la hora automática (salió más tarde) o **antes**
+     (salió más temprano);
+   - la salida automática toma la **hora real** y el origen "Checador planta", y se recalculan sus
+     horas;
+   - si el trabajador ya había repartido las horas por Job de la salida automática, se conservan y
+     se marcan para revisión (`revisar_horas`);
+   - queda constancia (`salida_auto_reemplazada`: hora y horas automáticas);
+   - **las checadas siguientes se re-secuencian:** la llegada del día siguiente vuelve a ser
+     Entrada.
+2. **Reparación automática de los casos que ya quedaron mal** (al iniciar el servidor, y con
+   `POST /api/checador/reparar-auto`): cuando una salida automática va seguida de una checada del
+   mismo periodo, se corrige igual que en el punto 1.
+3. **La salida automática espera al puente:** si la entrada vino del checador y el puente **no ha
+   enviado checadas desde antes de la hora de corte**, la salida automática se pospone, porque la
+   checada real puede venir en camino.
+   - Se cierra en cuanto el puente se pone al día y no trajo salida.
+   - Como máximo se esperan 48 h después del corte.
+
+## Probado (PostgreSQL local)
+- **Caso dañado tal cual** (entrada 8:15, automática 6:15 p.m., "entrada" 9:05 p.m., "salida" 7:54
+  a.m.) → reparado:
+  - entrada 8:15 → **salida 9:05 p.m. (12.83 h)**;
+  - **entrada** 7:54 a.m. del día siguiente.
+- **Las mismas checadas llegando tarde con la v2.30** → mismo resultado correcto, sin necesidad de
+  reparar.
+- **Checada a las 5:00 p.m.** (antes de la automática de 6:15) → la salida queda a las 5:00 p.m.
+  (8.74 h).
+- **Puente sin enviar desde antes del corte** → la salida automática se pospone. Con el puente al
+  día → se cierra.
