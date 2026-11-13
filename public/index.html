@@ -1378,11 +1378,10 @@
             <div class="table-wrap">
               <table id="jobsTable">
                 <thead>
-                  <tr style="background:var(--ink);">
+                  <tr style="background:var(--ink);" id="jobsTableHeadRow">
                     <th style="color:#fff;">Día</th>
                     <th style="color:#fff;">Fecha</th>
                     <th style="color:#fff;">Hrs Total</th>
-                    <th style="color:#fff;" id="jobsTableJobsHeader"></th>
                     <th style="color:#fff;">Acciones</th>
                   </tr>
                 </thead>
@@ -4926,8 +4925,11 @@ async function loadJobsReport() {
   jobsReportData = { worker, week, year, monday, sunday, days, jobs };
 
   // Build dynamic table headers
-  const extraCols = jobs.map(j => `<th style="color:#fff;">${j}</th>`).join('');
-  document.getElementById('jobsTableJobsHeader').outerHTML = extraCols;
+  // v2.32: el encabezado se reconstruye completo en cada consulta (antes la columna de Jobs
+  // reemplazaba su marcador y, desde la segunda consulta, el reporte ya no se regeneraba)
+  const extraCols = jobs.map(j => `<th style="color:#fff;" class="jobs-col-dyn">${j}</th>`).join('');
+  document.getElementById('jobsTableHeadRow').innerHTML =
+    `<th style="color:#fff;">Día</th><th style="color:#fff;">Fecha</th><th style="color:#fff;">Hrs Total</th>${extraCols}<th style="color:#fff;">Acciones</th>`;
 
   document.getElementById('jobsReportTitle').textContent = `${worker.name} — Semana ${week} / ${year}`;
 

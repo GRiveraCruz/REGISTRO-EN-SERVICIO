@@ -1182,3 +1182,30 @@ Es el tipo predeterminado al abrir "➕ Registro manual".
   **reemplazó la automática** (salida 22:00Z, 9 h, origen condicionado).
 - **En pantalla:** el botón del trabajador, el aviso de pendiente y el contador "(1)" en la ventana
   del administrador.
+
+---
+
+# v2.32 — Corrección: el reporte de Jobs no se regeneraba al cambiar de trabajador
+
+## Causa
+- **En Reportes ▸ Distribución de horas por Job,** la columna de cada Job se insertaba
+  **reemplazando** un marcador oculto del encabezado de la tabla.
+- **Desde la segunda consulta,** ese marcador ya no existía. El reporte fallaba antes de dibujar
+  la tabla y se quedaba mostrando los datos del primer trabajador, hasta que se reiniciaba la
+  sesión.
+- **Por eso parecía que el reporte semanal tampoco cambiaba** cuando se pasaba de una pestaña a
+  otra.
+
+## Corrección
+- **El encabezado de la tabla de Jobs se reconstruye completo en cada consulta:** Día, Fecha, Hrs
+  Total, una columna por Job y Acciones.
+- **Se puede consultar a un trabajador tras otro** (y cambiar de semana o de pestaña) sin
+  reiniciar sesión.
+
+## Probado (pantalla)
+- **Reporte semanal:** trabajador A → B → A, cambiando de modo individual a por área y de vuelta.
+  El título y los datos cambian cada vez.
+- **Distribución de horas por Job:** A → B → A.
+  - Encabezados correctos en cada consulta: "ADMIN" para A, y "ADMIN, 652-50" para B.
+  - Sin errores en la consola.
+- **Semanal → Jobs → Semanal:** se regenera correctamente.
