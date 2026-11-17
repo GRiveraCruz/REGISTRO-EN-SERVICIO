@@ -1053,6 +1053,12 @@ app.post('/api/records', aw(async (req, res) => {
   if (!['entrada', 'salida'].includes(tipo)) return res.status(400).json({ error: 'Tipo de registro inválido' });
   // v2.15: la SALIDA solo se asienta junto con la distribución de horas por Job (ADMIN o Jobs en WIP del ERP)
   if (tipo === 'salida') {
+  // v2.33: una salida normal no puede cerrar una entrada de hace más de 20 h (quedó abierta de otro día)
+  if (tipo === 'salida') {
+    const ultE = (await db.q('SELECT tipo, ts FROM kiosco_registros WHERE worker_tid = $1 ORDER BY ts DESC LIMIT 1', [workerId])).rows[0];
+    if (ultE && ultE.tipo === 'entrada' && Date.now() - Date.parse(ultE.ts) > 20 * 3600000)
+      return res.status(409).json({ error: `Tu entrada del ${new Date(ultE.ts).toLocaleString('es-MX', { timeZone: TZ_LOCAL })} quedó abierta de otro día. Registra la salida de ese día con "Registro condicionado" (salida de ayer) o pide a RRHH que la capture.`, entrada_vencida: true });
+  }
     const v = await validarJobHours(b.jobHours, b.totalHours, workerId);
     if (v.error) return res.status(400).json({ error: v.error, requiere_horas: true });
     b.jobHours = v.jobHours;
@@ -1335,10 +1341,16 @@ app.post('/api/registros-condicionados/:id/resolver', aw(async (req, res) => {
     // se vuelve a validar la secuencia contra el registro oficial al momento de autorizar
     const ant = (await c.query('SELECT id, tipo, ts FROM kiosco_registros WHERE worker_tid = $1 AND ts <= $2 ORDER BY ts DESC LIMIT 1', [p.worker_tid, p.ts])).rows[0];
     const sig = (await c.query('SELECT id, tipo, ts FROM kiosco_registros WHERE worker_tid = $1 AND ts > $2 ORDER BY ts ASC LIMIT 1', [p.worker_tid, p.ts])).rows[0];
-    let auto = null;
+    let auto = null, fusionar = null;
     if (p.tipo === 'entrada') {
-      if ((ant && ant.tipo === 'entrada') || (sig && sig.tipo === 'entrada'))
-        return { status: 409, body: { error: 'La secuencia ya no lo permite: hay otra entrada alrededor de esa hora. Revisa los registros del trabajador.' } };
+      if (ant && ant.tipo === 'entrada')
+        return { status: 409, body: { error: `Ya hay una entrada abierta antes de esa hora (${new Date(ant.ts).toLocaleString('es-MX', { timeZone: TZ_LOCAL })}). Revisa los registros del trabajador.` } };
+      if (sig && sig.tipo === 'entrada') {
+        // v2.34: el trabajador pidió la entrada condicionada y después checó entrada normal el mismo
+        // día (para poder trabajar). Al autorizar, esa entrada toma la hora autorizada (más temprana).
+        if (fechaLocalDe(sig.ts) === fechaLocalDe(p.ts) && Date.parse(sig.ts) > Date.parse(p.ts)) fusionar = sig;
+        else return { status: 409, body: { error: 'La secuencia ya no lo permite: hay otra entrada de otro día después de esa hora. Revisa los registros del trabajador.' } };
+      }
     } else {
       if (!ant || ant.tipo !== 'entrada') {
         // ¿la salida automática ya cerró ese periodo? → se reemplaza por la salida autorizada
@@ -1361,12 +1373,27 @@ app.post('/api/registros-condicionados/:id/resolver', aw(async (req, res) => {
       const data = { ...base, ...horas, jobHours: [], horas_pendientes: horas.totalHours > 0 };
       if (auto) { await c.query('UPDATE kiosco_registros SET ts = $2, data = $3 WHERE id = $1', [auto.id, p.ts, JSON.stringify({ ...data, salida_auto_reemplazada: { ts_auto: auto.ts } })]); regId = auto.id; }
       else { regId = uuidv4(); await c.query('INSERT INTO kiosco_registros (id, worker_tid, worker_name, tipo, ts, data) VALUES ($1,$2,$3,$4,$5,$6)', [regId, p.worker_tid, p.worker_name, 'salida', p.ts, JSON.stringify(data)]); }
+    } else if (fusionar) {
+      const e2 = (await c.query('SELECT id, ts, data FROM kiosco_registros WHERE id = $1', [fusionar.id])).rows[0];
+      const d2 = { ...(e2.data || {}), condicionado: base.condicionado, entrada_original: { ts: e2.ts, locationName: (e2.data || {}).locationName } };
+      await c.query('UPDATE kiosco_registros SET ts = $2, data = $3 WHERE id = $1', [e2.id, p.ts, JSON.stringify(d2)]);
+      regId = e2.id;
+      // la salida de ese periodo (si ya existe) recalcula sus horas desde la hora autorizada
+      const sal = (await c.query('SELECT id, tipo, ts, data FROM kiosco_registros WHERE worker_tid = $1 AND ts > $2 ORDER BY ts ASC LIMIT 1', [p.worker_tid, e2.ts])).rows[0];
+      if (sal && sal.tipo === 'salida') {
+        const ds = { ...(sal.data || {}) }, antes = ds.totalHours;
+        Object.assign(ds, horasSalida(p.ts, sal.ts));
+        if (Math.abs((antes || 0) - ds.totalHours) > 0.01) { ds.revisar_horas = true; ds.horas_pendientes = true; }   // el trabajador vuelve a repartir
+        ds.horas_recalculadas = { antes, despues: ds.totalHours, motivo: 'entrada condicionada autorizada', fecha: new Date().toISOString() };
+        await c.query('UPDATE kiosco_registros SET data = $2 WHERE id = $1', [sal.id, JSON.stringify(ds)]);
+      }
     } else {
       regId = uuidv4();
       await c.query('INSERT INTO kiosco_registros (id, worker_tid, worker_name, tipo, ts, data) VALUES ($1,$2,$3,$4,$5,$6)', [regId, p.worker_tid, p.worker_name, 'entrada', p.ts, JSON.stringify(base)]);
     }
     await c.query(`UPDATE kiosco_registros_pendientes SET estado = 'autorizado', data = data || $2 WHERE id = $1`, [p.id, JSON.stringify({ resolucion: resol, registro_id: regId })]);
-    return { status: 200, body: { success: true, estado: 'autorizado', registro_id: regId, reemplazo_salida_automatica: !!auto } };
+    return { status: 200, body: { success: true, estado: 'autorizado', registro_id: regId, reemplazo_salida_automatica: !!auto,
+                                  entrada_ajustada: fusionar ? { de: fusionar.ts, a: p.ts } : null } };
   });
   res.status(resultado.status).json(resultado.body);
 }));
@@ -1433,10 +1460,16 @@ let _autoCorriendo = false;
 async function cicloAutoCierre() {
   if (_autoCorriendo) return; _autoCorriendo = true;
   try {
-    const lk = (await db.q("SELECT pg_try_advisory_lock(hashtext('kiosco-autocierre')) AS ok")).rows[0];
-    if (!lk || !lk.ok) return;
-    try { await cerrarSalidasVencidas(); }
-    finally { await db.q("SELECT pg_advisory_unlock(hashtext('kiosco-autocierre'))"); }
+    // v2.33: el candado se toma y se suelta en la MISMA conexión. Antes cada consulta podía ir
+    // a una conexión distinta del pool: el candado quedaba tomado para siempre y la salida
+    // automática dejaba de ejecutarse (entradas —incluidas las de viaje— sin cerrar).
+    const c = await db.pool.connect();
+    try {
+      const lk = (await c.query("SELECT pg_try_advisory_lock(hashtext('kiosco-autocierre')) AS ok")).rows[0];
+      if (!lk || !lk.ok) return;
+      try { await cerrarSalidasVencidas(); }
+      finally { await c.query("SELECT pg_advisory_unlock(hashtext('kiosco-autocierre'))"); }
+    } finally { c.release(); }
   } catch (e) { console.warn('[AUTO-SALIDA]', e.message); }
   finally { _autoCorriendo = false; }
 }

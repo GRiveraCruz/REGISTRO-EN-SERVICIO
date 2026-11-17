@@ -2940,7 +2940,7 @@ async function condResolver(id, accion) {
   const r = await fetch(`/api/registros-condicionados/${id}/resolver`, { method: 'POST', headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ adminUser: currentUser.username, password: pw, accion, comentario }) });
   const d = await r.json(); if (!r.ok) return toast(d.error || 'No se pudo', 'error');
-  toast(accion === 'autorizar' ? `Autorizado: pasó al registro oficial${d.reemplazo_salida_automatica ? ' (reemplazó la salida automática)' : ''}` : 'Rechazado', 'success');
+  toast(accion === 'autorizar' ? `Autorizado: pasó al registro oficial${d.reemplazo_salida_automatica ? ' (reemplazó la salida automática)' : ''}${d.entrada_ajustada ? ` (la entrada de las ${new Date(d.entrada_ajustada.de).toLocaleTimeString('es-MX', { hour: '2-digit', minute: '2-digit' })} se ajustó a la hora autorizada y se recalcularon las horas de su salida)` : ''}` : 'Rechazado', 'success');
   condAdmListar();
 }
 
@@ -3412,6 +3412,19 @@ async function registerRecord(type) {
       const lastEntrada = new Date(myEntradas[0].timestamp);
       const diffMs = now - lastEntrada;
 
+      if (diffMs >= 20 * 3600000) {
+        // v2.33: la entrada quedó abierta de otro día (p. ej. un periodo de viaje que no se cerró).
+        // No se puede cerrar con una salida de hoy (las horas saldrían en 0 o absurdas).
+        const fEnt = lastEntrada.toLocaleString('es-MX', { weekday: 'long', day: '2-digit', month: 'long', hour: '2-digit', minute: '2-digit' });
+        const ayerOHoy = (Date.now() - lastEntrada.getTime()) < 48 * 3600000 && (new Date().getDate() - lastEntrada.getDate() <= 1);
+        _registroSesion = null; enableActionBtns();
+        alert(`Tu entrada del ${fEnt}${myEntradas[0].viaje && myEntradas[0].viaje.activo ? ' (día de viaje)' : ''} quedó abierta: no registraste la salida de ese día.\n\n`
+          + (ayerOHoy ? 'Usa "🕒 Registro condicionado" → "Salida de ayer" con la hora real en que terminaste; RRHH lo autorizará.'
+                      : 'Pide a RRHH que capture la salida de ese día con "Registro manual".')
+          + '\n\nEl sistema también la cierra solo con tu jornada normal a las 3:00 a.m. del día siguiente.');
+        if (ayerOHoy) { try { condAbrir(); document.getElementById('condTipo').value = 'salida|ayer'; } catch (e) {} }
+        return;
+      }
       // Protect against negative or absurd values (>36h = likely bad data)
       if (diffMs > 0 && diffMs < 36 * 3600000) {
         totalHours = Math.round((diffMs / 3600000) * 100) / 100;

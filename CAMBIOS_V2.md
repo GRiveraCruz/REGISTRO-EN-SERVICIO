@@ -1209,3 +1209,64 @@ Es el tipo predeterminado al abrir "➕ Registro manual".
   - Encabezados correctos en cada consulta: "ADMIN" para A, y "ADMIN, 652-50" para B.
   - Sin errores en la consola.
 - **Semanal → Jobs → Semanal:** se regenera correctamente.
+
+---
+
+# v2.33 — Corrección: periodo de viaje (o cualquier entrada) que no se cerró
+
+## Qué pasaba
+- **El trabajador registró una entrada de "Día de viaje" y olvidó la salida.**
+- **Al otro día, al presionar "Registrar Salida",** el kiosco calculaba las horas desde esa
+  entrada. Como habían pasado más de 36 h, las horas quedaban **en 0**, y la ventana de horas por
+  Job no deja guardar horas en cero. El trabajador no podía avanzar.
+- **La salida automática de las 3:00 a.m.** (v2.25) debió haber cerrado ese periodo. Su candado en
+  la base se tomaba en una conexión y se soltaba en **otra conexión** del pool: el candado se
+  quedaba tomado y **la salida automática dejaba de ejecutarse** después de la primera vez.
+
+## Corrección
+1. **Salida automática:** el candado se toma y se suelta en la **misma conexión**. El cierre de las
+   3:00 a.m. vuelve a correr cada 10 minutos, incluidas las entradas de viaje (la salida
+   automática conserva el viaje).
+2. **Kiosco:** si la última entrada tiene **más de 20 h**, "Registrar Salida" ya no abre la ventana
+   de horas en cero. Avisa: "Tu entrada del … (día de viaje) quedó abierta…".
+   - Si fue ayer, abre directamente **"🕒 Registro condicionado → Salida de ayer"** para poner la
+     hora real; RRHH lo autoriza.
+   - Si es más antigua, indica pedir a RRHH el **registro manual**.
+3. **Servidor:** rechaza una salida normal sobre una entrada de más de 20 h, con el mismo mensaje.
+
+## Probado
+- **Entrada de viaje de hace 30 h + salida normal hoy** → rechazada con el mensaje de entrada
+  abierta (antes: "Las horas no pueden quedar en cero").
+- **Salida automática ejecutada 3 veces seguidas:** la 1ª cierra la entrada de viaje (+10 h), y la
+  2ª y 3ª no duplican. El candado ya no se queda tomado.
+
+---
+
+# v2.34 — Corrección: entrada condicionada que ya no se podía autorizar
+
+## Qué pasaba
+- **El trabajador pidió una entrada condicionada** (ej. sábado 08:00, "olvido").
+- **Como esa entrada aún no estaba autorizada,** el registro oficial no tenía entrada. Para poder
+  trabajar y después checar su salida, **registró una entrada normal** (ej. 12:15) y luego su
+  salida.
+- **Al autorizar la condicionada,** ya había otra entrada después de las 08:00 y el kiosco la
+  rechazaba: "La secuencia ya no lo permite: hay otra entrada alrededor de esa hora".
+
+## Corrección
+- **Si después de la hora solicitada hay una entrada normal del mismo día,** al autorizar:
+  - esa entrada **toma la hora autorizada** (08:00); su hora original queda guardada en
+    `entrada_original`;
+  - la **salida** de ese periodo **recalcula sus horas** desde las 08:00 (`horas_recalculadas`:
+    antes / después);
+  - si las horas cambiaron, se marca para revisión y **se le vuelve a pedir al trabajador** que
+    reparta sus horas por Job.
+- **Sigue rechazándose** si la entrada posterior es de **otro día** o si ya hay una entrada
+  abierta antes de la hora solicitada.
+- **El aviso de autorización** indica que la entrada se ajustó y que se recalcularon las horas.
+
+## Probado
+- **Pendiente:** entrada 08:00. **Registros:** entrada 12:15 y salida 17:00 (4.75 h, ya
+  repartidas en ADMIN).
+- **Al autorizar:** la entrada queda a las **08:00** (original 12:15 guardada) y la salida
+  recalcula a **9 h**, marcada para revisión y con horas pendientes de repartir.
+- **Entrada posterior de otro día** → sigue bloqueado con el motivo.
